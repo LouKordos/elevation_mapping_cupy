@@ -3,6 +3,7 @@
 	"name": "Demo Elevation Mapping CUPY Workspace",
 	"dockerFile": "../docker/Dockerfile.x64",
 	"context": "../",
+    "build": { "options": ["--network=host"] },
 	"remoteUser": "ros",
 	"runArgs": [
 		"--network=host",
