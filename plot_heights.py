@@ -23,8 +23,8 @@ class HeightGridVisualizer(Node):
         self.map_frame = 'odom'
         self.robot_base_frame = 'base'
         self.map_topic = '/elevation_mapping_node/elevation_map_filter'
-        #self.input_layer = 'heights_body_frame'
-        self.input_layer = 'min_filter'
+        self.input_layer = 'heights_body_frame'
+        #self.input_layer = 'min_filter'
         
         # --- Feature Flags ---
         # Requirement 0: Add a boolean feature flag for TF transformation.
