@@ -11,6 +11,6 @@
         basic_layers: ['elevation']
         fps: 10.0
       elevation_map_filter:
-        layers: ['min_filter', 'smooth', 'elevation']
+        layers: ['min_filter', 'smooth', 'elevation', 'heights_body_frame']
         basic_layers: ['min_filter']
         fps: 10.0

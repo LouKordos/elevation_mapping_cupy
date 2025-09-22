@@ -9,20 +9,19 @@ from .plugin_manager import PluginBase
 
 
 class RobotCentricElevation(PluginBase):
-    """Generates an elevation map with respect to the robot frame.
-
-    Args:
-        cell_n (int):
-        resolution (ruamel.yaml.scalarfloat.ScalarFloat):
-        threshold (ruamel.yaml.scalarfloat.ScalarFloat):
-        use_threshold (bool):
-        **kwargs ():
-    """
+    """Generates an elevation map with respect to the robot frame."""
 
     def __init__(
-        self, cell_n: int = 100, resolution: float = 0.05, threshold: float = 0.4, use_threshold: bool = 0, **kwargs
+        self,
+        cell_n: int = 100,
+        resolution: float = 0.05,
+        threshold: float = 0.4,
+        use_threshold: bool = False,
+        input_layer_name: str = "elevation",
+        **kwargs,
     ):
         super().__init__()
+        self.input_layer_name = input_layer_name
         self.width = cell_n
         self.height = cell_n
         self.min_filtered = cp.zeros((self.width, self.height), dtype=cp.float32)
@@ -49,15 +48,17 @@ class RobotCentricElevation(PluginBase):
                     return true;
                 }
                 __device__ float get_map_x(int idx){
-                    float idx_x = idx / ${width}* ${resolution};
+                    float center_offset = ${width} * ${resolution} / 2.0;
+                    float idx_x = idx / ${width} * ${resolution} - center_offset;
                     return idx_x;
                 }
                 __device__ float get_map_y(int idx){
-                    float idx_y = idx % ${width}* ${resolution};
+                    float center_offset = ${height} * ${resolution} / 2.0;
+                    float idx_y = idx % ${height} * ${resolution} - center_offset;
                     return idx_y;
                 }
                 __device__ float transform_p(float x, float y, float z,
-                                     float r0, float r1, float r2) {
+                                        float r0, float r1, float r2) {
                     return r0 * x + r1 * y + r2 * z ;
                 }
                 """
@@ -69,9 +70,9 @@ class RobotCentricElevation(PluginBase):
                 if (valid > 0.5) {
                     U rx = get_map_x(get_map_idx(i, 0));
                     U ry = get_map_y(get_map_idx(i, 0));
-                    U x_b = transform_p(rx, ry, rz, R[0], R[1], R[2]);
-                    U y_b = transform_p(rx, ry, rz, R[3], R[4], R[5]);
-                    U z_b = transform_p(rx, ry, rz, R[6], R[7], R[8]);
+                    U x_b = transform_p(rx, ry, rz, R[0], R[3], R[6]);
+                    U y_b = transform_p(rx, ry, rz, R[1], R[4], R[7]);
+                    U z_b = transform_p(rx, ry, rz, R[2], R[5], R[8]);
                     if (${use_threshold} && z_b>= ${threshold} ) {
                         newmap[get_map_idx(i, 0)] = 1.0;
                     }
@@ -98,24 +99,28 @@ class RobotCentricElevation(PluginBase):
         rotation,
         *args,
     ) -> cp.ndarray:
-        """
+        # Get the specified input layer data
+        input_heights = self.get_layer_data(
+            elevation_map,
+            layer_names,
+            plugin_layers,
+            plugin_layer_names,
+            semantic_map,
+            semantic_layer_names,
+            self.input_layer_name,
+        )
+        if input_heights is None:
+            # Fallback to raw elevation if the desired layer is not found
+            print(f"Warning: layer '{self.input_layer_name}' not found for RobotCentricElevation. Falling back to 'elevation'.")
+            input_heights = elevation_map[0]
 
-        Args:
-            elevation_map (cupy._core.core.ndarray):
-            layer_names (List[str]):
-            plugin_layers (cupy._core.core.ndarray):
-            plugin_layer_names (List[str]):
-            semantic_map (elevation_mapping_cupy.semantic_map.SemanticMap):
-            rotation (cupy._core.core.ndarray):
-            *args ():
+        # Use the valid mask from the raw elevation map (layer 2)
+        valid_mask = elevation_map[2]
 
-        Returns:
-            cupy._core.core.ndarray:
-        """
-        # Process maps here
-        # check that transform is a ndarray
-        self.min_filtered = elevation_map[0].copy()
+        # Process maps here. The rotation is from base to map, so we need the transpose
+        # to transform points from map to base.
+        self.min_filtered = input_heights.copy()
         self.base_elevation_kernel(
-            elevation_map[0], elevation_map[2], rotation, self.min_filtered, size=(self.width * self.height),
+            input_heights, valid_mask, rotation.T, self.min_filtered, size=(self.width * self.height),
         )
         return self.min_filtered

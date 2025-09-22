@@ -11,26 +11,17 @@ min_filter:
 smooth_filter:
   enable: True
   fill_nan: False
-  is_height_layer: True
+  is_height_layer: False
   layer_name: "smooth"
   extra_params:
     input_layer_name: "min_filter"
-# Apply inpainting using opencv
-inpainting:
+
+# New plugin configuration for robot-centric height grid
+robot_centric_elevation:
   enable: True
-  fill_nan: False
   is_height_layer: True
-  layer_name: "inpaint"
-  extra_params:
-    method: "telea"                           # telea or ns
-# Apply smoothing for inpainted layer
-erosion:
-  enable: True
   fill_nan: False
-  is_height_layer: False
-  layer_name: "erosion"
+  layer_name: "heights_body_frame"
   extra_params:
-    input_layer_name: "traversability"
-    dilation_size: 3
-    iteration_n: 20
-    reverse: True
+    input_layer_name: "min_filter" # Use the output of min_filter as input
+    use_threshold: false
