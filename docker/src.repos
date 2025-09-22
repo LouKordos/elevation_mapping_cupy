@@ -13,3 +13,7 @@ repositories:
     type: git
     url: https://github.com/jwag/turtlebot3_simulations.git
     version: humble_realsense_depth
+  # For robot model in rviz
+  go2_description:
+    type: git
+    url: https://github.com/inria-paris-robotics-lab/go2_description.git

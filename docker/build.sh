@@ -16,6 +16,7 @@ colcon build \
                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=On" \
                 "-DBUILD_TESTING=OFF"\
                 "-DCMAKE_CXX_FLAGS="-Wl,--allow-shlib-undefined""\
+                "-DBUILD_DOCUMENTATION=OFF" \
         -Wall -Wextra -Wpedantic -Wshadow \
         --packages-skip \
                 convex_plane_decomposition \
