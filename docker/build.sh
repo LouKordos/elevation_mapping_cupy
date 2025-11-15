@@ -5,7 +5,6 @@ cd ~/workspace
 source /opt/ros/$ROS_DISTRO/setup.bash
 BUILD_TYPE=RelWithDebInfo #Debug, Release, RelWithDebInfo, MinSizeRel
 colcon build \
-        --continue-on-error \
         --parallel-workers $(nproc) \
         --merge-install \
         --symlink-install \

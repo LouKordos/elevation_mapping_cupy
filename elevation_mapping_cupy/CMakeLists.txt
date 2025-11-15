@@ -125,6 +125,7 @@ ament_python_install_package(${PROJECT_NAME})
 # Install the Python ROS 2 modules
 install(PROGRAMS
   scripts/elevation_mapping_node.py
+  scripts/elevation_to_policy_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

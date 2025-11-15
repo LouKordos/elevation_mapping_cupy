@@ -9,6 +9,6 @@ matplotlib
 catkin-tools
 networkx==3.0
 # cupy
-
+pyzmq
 ###### Requirements with Version Specifiers ######`
 shapely==1.7.1

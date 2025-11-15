@@ -79,6 +79,14 @@ def generate_launch_description():
         ],
         condition=IfCondition(use_python_node)
     )
+
+    elevation_to_policy_node = Node(
+        package='elevation_mapping_cupy',
+        executable='elevation_to_policy_node.py',
+        name='elevation_to_policy_node',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time}]
+    )
     
     rviz_node = Node(
         package='rviz2',
@@ -95,5 +103,6 @@ def generate_launch_description():
         use_python_node_arg,
         elevation_mapping_node_py,
         elevation_mapping_node,
+        elevation_to_policy_node,
         rviz_node
     ])

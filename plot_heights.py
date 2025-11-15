@@ -1,5 +1,7 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from grid_map_msgs.msg import GridMap
 import numpy as np
 import matplotlib.pyplot as plt
@@ -42,7 +44,17 @@ class HeightGridVisualizer(Node):
         
         # --- TF Listener ---
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        qos_tf = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=100,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE
+        )
+        qos_tf_static = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,        # static uses reliable + transient local
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, qos=qos_tf, static_qos=qos_tf_static)
         
         # --- Subscription ---
         self.subscription = self.create_subscription(
@@ -127,32 +139,26 @@ class HeightGridVisualizer(Node):
 
         if self.use_tf_transformation:
             try:
-                tf_base_to_map = self.tf_buffer.lookup_transform(
-                    self.robot_base_frame, self.map_frame, rclpy.time.Time())
+                # Wait up to 1.0 s for TF to become available
+                if not self.tf_buffer.can_transform(self.robot_base_frame, self.map_frame, rclpy.time.Time(), timeout=Duration(seconds=1.0)):
+                    frames_yaml = self.tf_buffer.all_frames_as_yaml()
+                    self.get_logger().warn(
+                        f"TF not available yet for '{self.robot_base_frame}'<-'{self.map_frame}'. "
+                        f"Known frames:\n{frames_yaml}",
+                        throttle_duration_sec=2
+                    )
+                    return
 
+                tf_base_from_map = self.tf_buffer.lookup_transform(self.robot_base_frame, self.map_frame, rclpy.time.Time())
 
-                trans = tf_base_to_map.transform.translation
+                trans = tf_base_from_map.transform.translation
                 t_map_to_base = np.array([trans.x, trans.y, trans.z])
-                rot = tf_base_to_map.transform.rotation
+                rot = tf_base_from_map.transform.rotation
                 R_map_to_base = ScipyRotation.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
-
-
-                points_map = np.stack([self.X_map.flatten(), self.Y_map.flatten(), Z_plot.flatten()], axis=1)
-                points_body = (R_map_to_base @ points_map.T).T + t_map_to_base
-                
-                X_plot = points_body[:, 0].reshape(self.rows, self.cols)
-                Y_plot = points_body[:, 1].reshape(self.rows, self.cols)
-                Z_plot = points_body[:, 2].reshape(self.rows, self.cols)
-
-
-                tf_map_to_base = self.tf_buffer.lookup_transform(self.map_frame, self.robot_base_frame, rclpy.time.Time())
-                robot_height_in_map = tf_map_to_base.transform.translation.z
 
 
             except TransformException as ex:
                 self.get_logger().warn(f'Could not perform TF transformation: {ex}', throttle_duration_sec=2)
-                return
-
 
         # Crop the final grids for each subplot
         x_subgrid_3d, y_subgrid_3d, z_subgrid_3d = self._crop_grids(
@@ -269,7 +275,9 @@ def main(args=None):
     rclpy.init(args=args)
     visualizer = HeightGridVisualizer()
     try:
-        rclpy.spin(visualizer)
+        executor = rclpy.executors.MultiThreadedExecutor()
+        executor.add_node(visualizer)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
