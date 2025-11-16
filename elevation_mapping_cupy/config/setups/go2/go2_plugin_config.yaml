@@ -11,7 +11,7 @@ min_filter:
 smooth_filter:
   enable: True
   fill_nan: False
-  is_height_layer: False
+  is_height_layer: True
   layer_name: "smooth"
   extra_params:
     input_layer_name: "min_filter"
