@@ -45,8 +45,10 @@ class ElevationToPolicyNode(Node):
         # Size: [1.0, 0.8], Res: 0.08 -> 13x11 points
         x_points = 13
         y_points = 11
-        x_span = (x_points - 1) * 0.16  # 0.96m
-        y_span = (y_points - 1) * 0.16  # 0.80m
+        # CORRECTION: 12 intervals * 0.08 res = 0.96m. 
+        # (Your snippet had 0.16 which results in 1.92m, contradicting the 0.96m comment)
+        x_span = (x_points - 1) * 0.08  # 0.96m 
+        y_span = (y_points - 1) * 0.08  # 0.80m
         
         # Grid centered at (0,0) in body frame
         x_coords = np.linspace(-x_span / 2.0, x_span / 2.0, x_points) 
