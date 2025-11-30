@@ -38,7 +38,6 @@ class ElevationToPolicyNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # Restore print options for troubleshooting
         np.set_printoptions(floatmode="fixed", precision=4, linewidth=1000,suppress=True) # For consistent printouts
 
         # Grid definitions matching GridPatternCfg
@@ -72,7 +71,7 @@ class ElevationToPolicyNode(Node):
         self.log_filename = "policy_data.bin"
         self.log_file = None
         try:
-            self.log_file = open(self.log_filename, "b")
+            self.log_file = open(self.log_filename, "wb")
             self.log_file_fd = self.log_file.fileno()
             # 'd' = float64 (timestamp), 'B' = uint8 (type), '143f' = 143x float32 (data)
             self.record_format = struct.Struct("d B 143f")
@@ -100,7 +99,8 @@ class ElevationToPolicyNode(Node):
         heights_policy_grid = result.astype(np.float32)
         
         # Reshape to (11, 13) for visualization where Rows=Y (Left/Right) and Cols=X (Back/Front)
-        print(heights_policy_grid.reshape(11, 13))
+        if layer_name == "min_filter":
+            print(heights_policy_grid.reshape(11, 13))
         
         payload = heights_policy_grid.tobytes()
         if len(payload) != 143 * 4: 
@@ -114,6 +114,7 @@ class ElevationToPolicyNode(Node):
                 data_type = 0 if zmq_publisher == self.zmq_pub_raw else 1
                 packed_data = self.record_format.pack(timestamp, data_type, *heights_policy_grid)
                 self.log_file.write(packed_data)
+                self.log_file.flush()
             except Exception as e:
                 self.get_logger().error(f"Failed to write to log file: {e}")
 
