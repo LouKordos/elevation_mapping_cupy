@@ -15,15 +15,18 @@ class GridConfig:
         self.span_x = (self.nx - 1) * self.res
         self.span_y = (self.ny - 1) * self.res
         
+        # Physical coordinates
         self.x_centers = np.linspace(-self.span_x / 2.0, self.span_x / 2.0, self.nx)
         self.y_centers = np.linspace(-self.span_y / 2.0, self.span_y / 2.0, self.ny)
         
+        # Extents for default imshow [left, right, bottom, top]
+        # Default: X is horizontal, Y is vertical
         half_res = self.res / 2.0
-        self.extent = [
-            self.x_centers[0] - half_res,
-            self.x_centers[-1] + half_res,
-            self.y_centers[0] - half_res,
-            self.y_centers[-1] + half_res
+        self.extent_default = [
+            self.x_centers[0] - half_res,  # Left (X min)
+            self.x_centers[-1] + half_res, # Right (X max)
+            self.y_centers[0] - half_res,  # Bottom (Y min)
+            self.y_centers[-1] + half_res  # Top (Y max)
         ]
 
 def load_data(filename, source_type, config: GridConfig):
@@ -95,52 +98,103 @@ def main():
     vmin, vmax = np.min(all_data), np.max(all_data)
     v_mid = (vmin + vmax) / 2.0
 
-    def setup_plot():
-        if state['cbar']: 
-            state['cbar'].remove()
-            state['cbar'] = None
-
-        ax.clear()
+    # --- Core Logic for Data/Grid orientation ---
+    def get_plot_config(frame_idx):
+        raw_data = frames[frame_idx]
         
         if state['swapped']:
-            nx, ny = cfg.ny, cfg.nx
-            x_ticks, y_ticks = cfg.y_centers, cfg.x_centers
-            extent = [cfg.extent[2], cfg.extent[3], cfg.extent[0], cfg.extent[1]]
-            lbl_x, lbl_y = "Y (m, body frame)", "X (m, body frame)"
-            frame_data = frames[int(slider.val)].T
+            # EGO VIEW:
+            # Vertical Axis = Robot X (Up is +)
+            # Horizontal Axis = Robot Y (Left is +, Right is -)
+            
+            # 1. Transpose: X becomes rows (vertical), Y becomes cols (horizontal)
+            # 2. Flip Cols: Visual Left becomes +Y, Visual Right becomes -Y
+            data = np.flip(raw_data.T, axis=1)
+            
+            # Ticks/Coords for Screen Horizontal Axis (Y coordinates)
+            # Since we flipped the data columns, we flip the coordinate array too
+            # Screen Left = Y Max, Screen Right = Y Min
+            screen_x_ticks = np.flip(cfg.y_centers)
+            screen_y_ticks = cfg.x_centers
+            
+            # Extent [left, right, bottom, top]
+            # Left = +Y limit, Right = -Y limit
+            extent = [
+                cfg.extent_default[3], # Y Top (+Y) -> Screen Left
+                cfg.extent_default[2], # Y Bottom (-Y) -> Screen Right
+                cfg.extent_default[0], # X Left (-X) -> Screen Bottom
+                cfg.extent_default[1]  # X Right (+X) -> Screen Top
+            ]
+            
+            lbl_x = "Y (m, Left +, Right -)"
+            lbl_y = "X (m, Forward +)"
+            nx_screen, ny_screen = cfg.ny, cfg.nx
+            btn_text = "Switch to Grid View"
+            
         else:
-            nx, ny = cfg.nx, cfg.ny
-            x_ticks, y_ticks = cfg.x_centers, cfg.y_centers
-            extent = cfg.extent
-            lbl_x, lbl_y = "X (m, body frame)", "Y (m, body frame)"
-            frame_data = frames[int(slider.val)]
+            # GRID VIEW (Default):
+            # Vertical Axis = Y
+            # Horizontal Axis = X
+            data = raw_data
+            
+            screen_x_ticks = cfg.x_centers
+            screen_y_ticks = cfg.y_centers
+            extent = cfg.extent_default
+            
+            lbl_x = "X (m, body frame)"
+            lbl_y = "Y (m, body frame)"
+            nx_screen, ny_screen = cfg.nx, cfg.ny
+            btn_text = "Switch to Ego View"
+            
+        return data, extent, screen_x_ticks, screen_y_ticks, lbl_x, lbl_y, nx_screen, ny_screen, btn_text
 
-        state['im'] = ax.imshow(frame_data, vmin=vmin, vmax=vmax, extent=extent,
+    def setup_plot():
+        # Clean up previous elements
+        if state['cbar']: 
+            try: state['cbar'].remove()
+            except: pass
+            state['cbar'] = None
+        ax.clear()
+        
+        # Get configuration for current state
+        data, extent, x_ticks, y_ticks, lbl_x, lbl_y, nx_s, ny_s, btn_txt = get_plot_config(int(slider.val))
+        
+        btn_swap.label.set_text(btn_txt)
+
+        # Plot Image
+        state['im'] = ax.imshow(data, vmin=vmin, vmax=vmax, extent=extent,
                                 origin='lower', interpolation='nearest', cmap='viridis')
 
+        # Configure Ticks
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
-        ax.set_xticks(np.linspace(extent[0], extent[1], nx + 1), minor=True)
-        ax.set_yticks(np.linspace(extent[2], extent[3], ny + 1), minor=True)
+        
+        # Configure Grid (Minor ticks at edges)
+        ax.set_xticks(np.linspace(extent[0], extent[1], nx_s + 1), minor=True)
+        ax.set_yticks(np.linspace(extent[2], extent[3], ny_s + 1), minor=True)
         
         ax.tick_params(which='major', length=0)
         ax.tick_params(which='minor', length=0)
         ax.grid(which='minor', color='black', linestyle='-', linewidth=0.5)
 
-        if nx > 15: ax.set_xticks(x_ticks[::2])
-        if ny > 15: ax.set_yticks(y_ticks[::2])
+        # Decimate ticks if dense
+        if nx_s > 15: ax.set_xticks(x_ticks[::2])
+        if ny_s > 15: ax.set_yticks(y_ticks[::2])
 
         ax.set_xlabel(lbl_x)
         ax.set_ylabel(lbl_y)
 
+        # Setup Text Annotations
+        # We iterate over SCREEN coordinates (ny_s rows, nx_s cols)
         state['text_objs'] = []
-        for y_idx in range(ny):
-            row = []
-            for x_idx in range(nx):
-                t = ax.text(x_ticks[x_idx], y_ticks[y_idx], "", ha="center", va="center", 
-                            fontsize=7, fontweight='bold')
-                row.append(t)
-            state['text_objs'].append(row)
+        for r in range(ny_s):
+            row_objs = []
+            for c in range(nx_s):
+                # Place text at the physical coordinate of this pixel center
+                t = ax.text(x_ticks[c], y_ticks[r], "", 
+                            ha="center", va="center", fontsize=7, fontweight='bold')
+                row_objs.append(t)
+            state['text_objs'].append(row_objs)
 
         state['cbar'] = fig.colorbar(state['im'], ax=ax, fraction=0.046, pad=0.04)
         state['cbar'].set_label('Height (m)')
@@ -149,15 +203,18 @@ def main():
 
     def update(val):
         idx = int(val)
-        data = frames[idx].T if state['swapped'] else frames[idx]
         
+        # Retrieve strictly formatted data for display
+        data, _, _, _, _, _, _, _, _ = get_plot_config(idx)
         state['im'].set_data(data)
         
-        ny, nx = data.shape
-        for y in range(ny):
-            for x in range(nx):
-                val = data[y, x]
-                txt = state['text_objs'][y][x]
+        rows, cols = data.shape
+        
+        # Update text values using the EXACT data array being displayed
+        for r in range(rows):
+            for c in range(cols):
+                val = data[r, c]
+                txt = state['text_objs'][r][c]
                 txt.set_text(f"{val:.3f}")
                 txt.set_color("white" if val < v_mid else "black")
         
@@ -165,10 +222,10 @@ def main():
         ax.set_title(f"Source: {args.source.title()} | Frame {idx} | T: {t_curr:.2f}s")
         fig.canvas.draw_idle()
 
+    # --- UI Components ---
     ax_slider = plt.axes([0.15, 0.1, 0.7, 0.03])
     slider = Slider(ax=ax_slider, label='Frame', valmin=0, valmax=len(frames) - 1, valinit=0, valstep=1)
-    slider.on_changed(update)
-
+    
     ax_prev = plt.axes([0.15, 0.04, 0.05, 0.04])
     btn_prev = Button(ax_prev, '<')
 
@@ -178,20 +235,18 @@ def main():
     ax_next = plt.axes([0.28, 0.04, 0.05, 0.04])
     btn_next = Button(ax_next, '>')
 
-    ax_swap = plt.axes([0.75, 0.04, 0.1, 0.04])
-    btn_swap = Button(ax_swap, 'Swap X/Y')
+    ax_swap = plt.axes([0.65, 0.04, 0.2, 0.04])
+    btn_swap = Button(ax_swap, 'Switch to Ego View')
 
     def toggle_swap(event):
         state['swapped'] = not state['swapped']
         setup_plot()
     
     def prev_frame(event):
-        new_val = max(0, slider.val - 1)
-        slider.set_val(new_val)
+        slider.set_val(max(0, slider.val - 1))
 
     def next_frame(event):
-        new_val = min(len(frames) - 1, slider.val + 1)
-        slider.set_val(new_val)
+        slider.set_val(min(len(frames) - 1, slider.val + 1))
 
     def toggle_play(event):
         state['playing'] = not state['playing']
@@ -205,14 +260,14 @@ def main():
     def on_timer():
         if state['playing']:
             new_val = slider.val + 1
-            if new_val >= len(frames):
-                new_val = 0
+            if new_val >= len(frames): new_val = 0
             slider.set_val(new_val)
 
     btn_swap.on_clicked(toggle_swap)
     btn_prev.on_clicked(prev_frame)
     btn_next.on_clicked(next_frame)
     btn_play.on_clicked(toggle_play)
+    slider.on_changed(update)
 
     state['timer'] = fig.canvas.new_timer(interval=100)
     state['timer'].add_callback(on_timer)
