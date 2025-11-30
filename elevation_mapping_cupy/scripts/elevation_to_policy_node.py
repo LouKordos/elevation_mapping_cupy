@@ -11,6 +11,7 @@ from scipy.spatial.transform import Rotation as ScipyRotation
 from scipy.interpolate import RegularGridInterpolator
 import os
 import struct
+from datetime import datetime
 
 class ElevationToPolicyNode(Node):
     """
@@ -102,9 +103,9 @@ class ElevationToPolicyNode(Node):
         mode_str = "ABSOLUTE" if self.store_absolute_z else "RELATIVE"
         self.get_logger().info(f"Node Initialized. Mode: {mode_str}. Version: {self.data_version}")
 
-    def init_log_files(self, start_stamp):
+    def init_log_files(self):
         """Creates one file per layer using the start timestamp."""
-        timestamp_str = f"{start_stamp.sec}_{start_stamp.nanosec:09d}"
+        timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S.%f") # To avoid special characters in paths
         
         for layer in self.target_layers:
             filename = f"{timestamp_str}_{layer}.bin"
@@ -136,7 +137,7 @@ class ElevationToPolicyNode(Node):
         
         # Initialize files on first callback
         if not self.files:
-            self.init_log_files(stamp)
+            self.init_log_files()
 
         timestamp_scalar = stamp.sec + stamp.nanosec * 1e-9
         
