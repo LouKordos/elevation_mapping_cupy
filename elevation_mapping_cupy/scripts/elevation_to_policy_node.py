@@ -22,7 +22,7 @@ class ElevationToPolicyNode(Node):
     - Computes relative height (Map Z - Base Z) to match the policy input.
     """
     def __init__(self):
-        super().__init__('elevation_to_policy_node')
+        super().__init__("elevation_to_policy_node")
         
         self.declare_parameter("store_absolute_z", False)
         self.store_absolute_z = self.get_parameter("store_absolute_z").get_parameter_value().bool_value
@@ -52,7 +52,8 @@ class ElevationToPolicyNode(Node):
         x_coords = np.linspace(-x_span / 2.0, x_span / 2.0, x_points) 
         y_coords = np.linspace(-y_span / 2.0, y_span / 2.0, y_points)
         
-        grid_x, grid_y = np.meshgrid(x_coords, y_coords) # Default indexing='xy'
+        # indexing='xy' creates grid_x with shape (Rows=11, Cols=13)
+        grid_x, grid_y = np.meshgrid(x_coords, y_coords) 
         
         # Flatten for vector operations (Shape: 143, 2)
         self.query_points_body_frame = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
@@ -60,16 +61,19 @@ class ElevationToPolicyNode(Node):
         self.create_subscription(GridMap, "/elevation_mapping_node/elevation_map_raw", self.raw_map_callback, 10)
         self.create_subscription(GridMap, "/elevation_mapping_node/elevation_map_filter", self.filtered_map_callback, 10)
         
+        # Sentinel values
+        # NOTE: 0.0 is risky for absolute fill value if the ground is actually at Z=0.0. 
+        # Consider using -100.0 or np.nan if possible.
         self.fill_value_body_frame = -0.27
         self.fill_value_absolute = 0.0
 
         self.log_filename = "policy_data.bin"
         self.log_file = None
         try:
-            self.log_file = open(self.log_filename, 'ab')
+            self.log_file = open(self.log_filename, "ab")
             self.log_file_fd = self.log_file.fileno()
             # 'd' = float64 (timestamp), 'B' = uint8 (type), '143f' = 143x float32 (data)
-            self.record_format = struct.Struct('d B 143f')
+            self.record_format = struct.Struct("d B 143f")
         except Exception as e:
             self.get_logger().error(f"Failed to open log file {self.log_filename}: {e}")
 
@@ -77,10 +81,10 @@ class ElevationToPolicyNode(Node):
         self.get_logger().info(f"Node Initialized. Mode: {mode_str}")
 
     def raw_map_callback(self, msg: GridMap):
-        self.process_and_publish(msg, 'elevation', self.zmq_pub_raw)
+        self.process_and_publish(msg, "elevation", self.zmq_pub_raw)
 
     def filtered_map_callback(self, msg: GridMap):
-        self.process_and_publish(msg, 'min_filter', self.zmq_pub_filtered)
+        self.process_and_publish(msg, "min_filter", self.zmq_pub_filtered)
 
     def process_and_publish(self, msg: GridMap, layer_name: str, zmq_publisher: zmq.Socket):
         stamp = msg.header.stamp
@@ -93,7 +97,8 @@ class ElevationToPolicyNode(Node):
 
         heights_policy_grid = result.astype(np.float32)
         
-        print(heights_policy_grid.reshape(11,13))
+        # Reshape to (11, 13) for visualization where Rows=Y (Left/Right) and Cols=X (Back/Front)
+        print(heights_policy_grid.reshape(11, 13))
         
         payload = heights_policy_grid.tobytes()
         if len(payload) != 143 * 4: 
@@ -113,7 +118,7 @@ class ElevationToPolicyNode(Node):
     def get_policy_heights(self, msg: GridMap, layer_name: str, stamp):
         try:
             # Robot Pose Lookup (Base -> Odom)
-            # Training uses 'attach_yaw_only=True', so we must manually construct a Yaw-only rotation matrix for the transform.
+            # Training uses 'attach_yaw_only=True', so we must manually construct a Yaw-only rotation matrix.
             tf_base_to_map = self.tf_buffer.lookup_transform(
                 target_frame=self.map_frame, 
                 source_frame=self.robot_base_frame, 
@@ -128,14 +133,14 @@ class ElevationToPolicyNode(Node):
             
             # Extract Yaw
             R_quat = ScipyRotation.from_quat([rot.x, rot.y, rot.z, rot.w])
-            yaw = R_quat.as_euler('zxy')[0] 
+            yaw = R_quat.as_euler("zxy")[0] 
             
             # 2D Rotation (Yaw only)
             c, s = np.cos(yaw), np.sin(yaw)
             R_yaw_2D = np.array([[c, -s], [s, c]])
 
         except TransformException as ex:
-            self.get_logger().warn(f'TF Lookup Failed between {self.map_frame} and {self.robot_base_frame}: {ex}', throttle_duration_sec=1.0)
+            self.get_logger().warn(f"TF Lookup Failed between {self.map_frame} and {self.robot_base_frame}: {ex}", throttle_duration_sec=1.0)
             return None
 
         if layer_name not in msg.layers:
@@ -185,9 +190,11 @@ class ElevationToPolicyNode(Node):
         p_rotated = self.query_points_body_frame @ R_yaw_2D.T 
         query_points_odom = p_rotated + t_base_map_2D
 
+        # Select Fill Value based on mode
         fill_value = self.fill_value_absolute if self.store_absolute_z else self.fill_value_body_frame
 
         # Interpolate
+        # bounds_error=False allows extrapolation or use of fill_value for out-of-bounds points
         interpolator = RegularGridInterpolator((x_vec, y_vec), map_data, bounds_error=False, fill_value=fill_value)
         interpolated_z_abs = interpolator(query_points_odom)
 
@@ -201,9 +208,11 @@ class ElevationToPolicyNode(Node):
             return interpolated_z_abs
         else:
             # Training Logic: Height = Hit_Z_World - Base_Z_World
-            valid_mask = (interpolated_z_abs != fill_value)
-            result = np.full_like(interpolated_z_abs, fill_value)
+            # Mask out invalid (filled) points so we don't subtract robot_z from them
+            # We use isclose because float equality checks can be flaky
+            valid_mask = ~np.isclose(interpolated_z_abs, fill_value)
             
+            result = np.full_like(interpolated_z_abs, fill_value)
             # Subtract robot Z from valid map points
             result[valid_mask] = interpolated_z_abs[valid_mask] - robot_z
             return result
@@ -227,5 +236,5 @@ def main(args=None):
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
