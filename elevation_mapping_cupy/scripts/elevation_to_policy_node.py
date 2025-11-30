@@ -72,7 +72,7 @@ class ElevationToPolicyNode(Node):
         self.log_filename = "policy_data.bin"
         self.log_file = None
         try:
-            self.log_file = open(self.log_filename, "ab")
+            self.log_file = open(self.log_filename, "b")
             self.log_file_fd = self.log_file.fileno()
             # 'd' = float64 (timestamp), 'B' = uint8 (type), '143f' = 143x float32 (data)
             self.record_format = struct.Struct("d B 143f")
