@@ -4,13 +4,15 @@ from matplotlib.widgets import Slider, Button
 import struct
 import argparse
 import sys
+import os
 
 class GridConfig:
-    def __init__(self, width_points, height_points, resolution):
+    def __init__(self, width_points, height_points, resolution, sensor_off_x):
         self.nx = width_points
         self.ny = height_points
         self.res = resolution
         self.total_points = self.nx * self.ny
+        self.sensor_off_x = sensor_off_x
         
         self.span_x = (self.nx - 1) * self.res
         self.span_y = (self.ny - 1) * self.res
@@ -28,58 +30,85 @@ class GridConfig:
             self.y_centers[-1] + half_res
         ]
 
-def load_data(filename, source_type, config: GridConfig):
-    policy_shape = (config.ny, config.nx)
-    data_type_to_load = 1 if source_type == 'filtered' else 0
+def load_data(filename):
+    frames_data = []
+    
+    # 1. Define Formats
+    # File Header: Ver(B), Res(f), OffX(f), nx(H), ny(H), 67x(Pad) -> 80 Bytes
+    file_header_struct = struct.Struct('< B f f H H 67x')
+    
+    # Frame Header: Time(d), ID(B), Valid(f), Pose(7f), 32x(Pad) -> 73 Bytes
+    frame_header_struct = struct.Struct('< d B f 7f 32x')
 
-    try:
-        record_format = struct.Struct(f'd B {config.total_points}f')
-    except Exception as e:
-        print(f"Error creating struct format: {e}")
-        return None, None
-        
-    timestamps = []
-    frames = []
-
-    print(f"Loading '{source_type}' data from {filename}...")
+    print(f"Loading data from {filename}...")
 
     try:
         with open(filename, 'rb') as f:
+            # --- READ STATIC FILE HEADER (ONCE) ---
+            file_header_bytes = f.read(file_header_struct.size)
+            if len(file_header_bytes) < file_header_struct.size:
+                print("Error: File too short for header.")
+                return None, None
+
+            (ver, res, off_x, nx, ny) = file_header_struct.unpack(file_header_bytes)
+            
+            # Create Config Object based on file header
+            config = GridConfig(nx, ny, res, off_x)
+            
+            # Calculate dynamic data size
+            num_points = nx * ny
+            grid_body_size = num_points * 4 # 4 bytes per float
+
+            print(f"File Header: Ver={ver}, Grid={nx}x{ny}, Res={res:.3f}m")
+
+            # --- READ FRAMES LOOP ---
             while True:
-                buffer = f.read(record_format.size)
-                if len(buffer) < record_format.size: break 
+                # A. Read Frame Header
+                frame_header_bytes = f.read(frame_header_struct.size)
+                if len(frame_header_bytes) < frame_header_struct.size:
+                    break # EOF
                 
-                unpacked = record_format.unpack(buffer)
-                if unpacked[1] == data_type_to_load:
-                    timestamps.append(unpacked[0])
-                    flat_data = np.array(unpacked[2:], dtype=np.float32)
-                    frames.append(flat_data.reshape(policy_shape))
+                (ts, lid, valid, 
+                 rx, ry, rz, rqx, rqy, rqz, rqw) = frame_header_struct.unpack(frame_header_bytes)
+
+                # B. Read Grid Data
+                grid_bytes = f.read(grid_body_size)
+                if len(grid_bytes) < grid_body_size:
+                    print("Warning: Incomplete frame body at EOF.")
+                    break
+
+                flat_data = np.frombuffer(grid_bytes, dtype=np.float32)
+                
+                frames_data.append({
+                    'timestamp': ts,
+                    'layer_id': lid,
+                    'validity': valid,
+                    'pose': (rx, ry, rz),
+                    'quat': (rqx, rqy, rqz, rqw),
+                    'grid': flat_data.reshape(ny, nx)
+                })
 
     except FileNotFoundError:
         print(f"Error: File not found at {filename}")
         return None, None
     
-    if not frames:
+    if not frames_data:
         print("No data found.")
         return None, None
     
-    print(f"Loaded {len(frames)} frames.")
-    return timestamps, frames
+    print(f"Loaded {len(frames_data)} frames.")
+    return frames_data, config
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('filename', type=str, default='policy_data.bin', nargs='?')
-    parser.add_argument('--source', type=str, default='filtered', choices=['raw', 'filtered'])
-    parser.add_argument('--width', type=int, default=13)
-    parser.add_argument('--height', type=int, default=11)
-    parser.add_argument('--res', type=float, default=0.08)
     args = parser.parse_args()
 
     np.set_printoptions(floatmode="fixed", precision=4, linewidth=1000, suppress=True)
 
-    cfg = GridConfig(args.width, args.height, args.res)
-    timestamps, frames = load_data(args.filename, args.source, cfg)
-    if timestamps is None: sys.exit(1)
+    # Load data and config
+    frames, cfg = load_data(args.filename)
+    if frames is None: sys.exit(1)
 
     # State container
     state = {
@@ -92,63 +121,54 @@ def main():
         'timer': None
     }
     
-    fig, ax = plt.subplots(figsize=(10, 8))
-    plt.subplots_adjust(bottom=0.2, top=0.9, left=0.1, right=0.9)
+    fig, ax = plt.subplots(figsize=(10, 9))
+    plt.subplots_adjust(bottom=0.15, top=0.88, left=0.1, right=0.9)
 
-    # Calculate global min/max in METERS
-    all_data_m = np.stack(frames)
-    global_vmin_m = np.min(all_data_m)
-    global_vmax_m = np.max(all_data_m)
+    # Calculate global min/max
+    all_grids = np.stack([f['grid'] for f in frames])
+    global_vmin_m = np.min(all_grids)
+    global_vmax_m = np.max(all_grids)
+    
+    layer_names = {0: "Elevation", 1: "Min Filter", 2: "Smooth"}
 
     def get_plot_config(frame_idx):
-        raw_data = frames[frame_idx] # Always meters
+        frame = frames[frame_idx]
+        raw_data = frame['grid']
         
         # 1. Determine Scale Factor
         if state['unit'] == 'cm':
             scale = 100.0
             unit_label = "cm"
-            fmt_str = "{:.1f}" # 1 decimal for cm
+            fmt_str = "{:.1f}" 
         else:
             scale = 1.0
             unit_label = "m"
-            fmt_str = "{:.3f}" # 3 decimals for m
+            fmt_str = "{:.3f}" 
 
-        # 2. Scale Global Limits for Colorbar
+        # 2. Scale Global Limits
         curr_vmin = global_vmin_m * scale
         curr_vmax = global_vmax_m * scale
         
-        # 3. Handle View Transformation (Swap) AND Scaling
+        # 3. Handle View Transformation
         if state['swapped']:
-            # --- EGO VIEW ---
-            # Data: Transpose then Flip Horizontal
-            # Math: (Rows=X, Cols=Y). Flip Cols so +Y is Left.
             data = np.flip(raw_data.T, axis=1) * scale
-            
-            # Coords: Scale the physical centers
-            # Screen X (Horizontal) is Y-Axis of robot (Flipped)
             screen_x_ticks = np.flip(cfg.y_centers) * scale
             screen_y_ticks = cfg.x_centers * scale
-            
-            # Extent: [Left(+Y), Right(-Y), Bottom(-X), Top(+X)] * scale
             extent = [
                 cfg.extent_default[3] * scale, 
                 cfg.extent_default[2] * scale,
                 cfg.extent_default[0] * scale, 
                 cfg.extent_default[1] * scale
             ]
-            
             lbl_x = f"Y ({unit_label}, Left +, Right -)"
             lbl_y = f"X ({unit_label}, Forward +)"
             nx_s, ny_s = cfg.ny, cfg.nx
             btn_swap_txt = "View: Grid"
         else:
-            # --- GRID VIEW ---
             data = raw_data * scale
-            
             screen_x_ticks = cfg.x_centers * scale
             screen_y_ticks = cfg.y_centers * scale
             extent = [x * scale for x in cfg.extent_default]
-            
             lbl_x = f"X ({unit_label}, body frame)"
             lbl_y = f"Y ({unit_label}, body frame)"
             nx_s, ny_s = cfg.nx, cfg.ny
@@ -167,7 +187,8 @@ def main():
             'vmax': curr_vmax,
             'unit': unit_label,
             'fmt': fmt_str,
-            'swap_txt': btn_swap_txt
+            'swap_txt': btn_swap_txt,
+            'meta': frame 
         }
 
     def setup_plot():
@@ -180,11 +201,9 @@ def main():
         
         cfg_plot = get_plot_config(int(slider.val))
         
-        # Update Button Labels
         btn_swap.label.set_text(cfg_plot['swap_txt'])
         btn_unit.label.set_text(f"Unit: {cfg_plot['unit']}")
 
-        # Plot Image
         state['im'] = ax.imshow(
             cfg_plot['data'], 
             vmin=cfg_plot['vmin'], 
@@ -193,31 +212,26 @@ def main():
             origin='lower', interpolation='nearest', cmap='viridis'
         )
 
-        # Configure Ticks
         ax.set_xticks(cfg_plot['x_ticks'])
         ax.set_yticks(cfg_plot['y_ticks'])
         
-        # Grid lines (at edges)
+        # Minor grid lines
         ax.set_xticks(np.linspace(cfg_plot['extent'][0], cfg_plot['extent'][1], cfg_plot['nx'] + 1), minor=True)
         ax.set_yticks(np.linspace(cfg_plot['extent'][2], cfg_plot['extent'][3], cfg_plot['ny'] + 1), minor=True)
-        
         ax.tick_params(which='major', length=0)
         ax.tick_params(which='minor', length=0)
         ax.grid(which='minor', color='black', linestyle='-', linewidth=0.5)
 
-        # Decimate ticks if dense
         if cfg_plot['nx'] > 15: ax.set_xticks(cfg_plot['x_ticks'][::2])
         if cfg_plot['ny'] > 15: ax.set_yticks(cfg_plot['y_ticks'][::2])
 
         ax.set_xlabel(cfg_plot['lbl_x'])
         ax.set_ylabel(cfg_plot['lbl_y'])
 
-        # Create Text Objects
         state['text_objs'] = []
         for r in range(cfg_plot['ny']):
             row_objs = []
             for c in range(cfg_plot['nx']):
-                # Initial placeholder
                 t = ax.text(cfg_plot['x_ticks'][c], cfg_plot['y_ticks'][r], "", 
                             ha="center", va="center", fontsize=7, fontweight='bold')
                 row_objs.append(t)
@@ -233,10 +247,7 @@ def main():
         cfg_plot = get_plot_config(idx)
         
         state['im'].set_data(cfg_plot['data'])
-        
-        # Use mid-point of the CURRENT scaled range for text color contrast
         v_mid = (cfg_plot['vmin'] + cfg_plot['vmax']) / 2.0
-        
         data = cfg_plot['data']
         rows, cols = data.shape
         
@@ -244,50 +255,46 @@ def main():
             for c in range(cols):
                 val = data[r, c]
                 txt = state['text_objs'][r][c]
-                # Apply dynamic formatting based on unit
                 txt.set_text(cfg_plot['fmt'].format(val))
                 txt.set_color("white" if val < v_mid else "black")
         
-        t_curr = timestamps[idx] - timestamps[0]
-        ax.set_title(f"Source: {args.source.title()} | Frame {idx} | T: {t_curr:.2f}s")
+        meta = cfg_plot['meta']
+        t_curr = meta['timestamp'] - frames[0]['timestamp']
+        layer_name = layer_names.get(meta['layer_id'], "Unknown")
+        rx, ry, rz = meta['pose']
+        
+        # Note: cfg.res is now used from the Config object
+        title_str = (
+            f"Frame {idx} | T: {t_curr:.2f}s | Layer: {layer_name}\n"
+            f"Valid: {meta['validity']*100:.1f}% | Res: {cfg.res:.2f}m\n"
+            f"Robot Pose: X={rx:.2f}, Y={ry:.2f}, Z={rz:.2f}"
+        )
+        ax.set_title(title_str, fontsize=10)
         fig.canvas.draw_idle()
 
     # --- UI Components ---
-    # Slider
-    ax_slider = plt.axes([0.15, 0.1, 0.7, 0.03])
+    ax_slider = plt.axes([0.15, 0.08, 0.7, 0.03])
     slider = Slider(ax=ax_slider, label='Frame', valmin=0, valmax=len(frames) - 1, valinit=0, valstep=1)
     
-    # Buttons [left, bottom, width, height]
-    ax_prev = plt.axes([0.15, 0.04, 0.05, 0.04])
+    ax_prev = plt.axes([0.15, 0.02, 0.05, 0.04])
     btn_prev = Button(ax_prev, '<')
-
-    ax_play = plt.axes([0.21, 0.04, 0.06, 0.04])
+    ax_play = plt.axes([0.21, 0.02, 0.06, 0.04])
     btn_play = Button(ax_play, 'Play')
-
-    ax_next = plt.axes([0.28, 0.04, 0.05, 0.04])
+    ax_next = plt.axes([0.28, 0.02, 0.05, 0.04])
     btn_next = Button(ax_next, '>')
-
-    ax_swap = plt.axes([0.65, 0.04, 0.12, 0.04])
+    ax_swap = plt.axes([0.65, 0.02, 0.12, 0.04])
     btn_swap = Button(ax_swap, 'View: Grid')
-
-    ax_unit = plt.axes([0.78, 0.04, 0.12, 0.04])
+    ax_unit = plt.axes([0.78, 0.02, 0.12, 0.04])
     btn_unit = Button(ax_unit, 'Unit: m')
 
-    # --- Callbacks ---
     def toggle_swap(event):
         state['swapped'] = not state['swapped']
         setup_plot()
-    
     def toggle_unit(event):
         state['unit'] = 'cm' if state['unit'] == 'm' else 'm'
         setup_plot()
-
-    def prev_frame(event):
-        slider.set_val(max(0, slider.val - 1))
-
-    def next_frame(event):
-        slider.set_val(min(len(frames) - 1, slider.val + 1))
-
+    def prev_frame(event): slider.set_val(max(0, slider.val - 1))
+    def next_frame(event): slider.set_val(min(len(frames) - 1, slider.val + 1))
     def toggle_play(event):
         state['playing'] = not state['playing']
         if state['playing']:
@@ -296,7 +303,6 @@ def main():
         else:
             btn_play.label.set_text('Play')
             state['timer'].stop()
-
     def on_timer():
         if state['playing']:
             new_val = slider.val + 1
