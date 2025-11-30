@@ -79,7 +79,14 @@ def main():
     timestamps, frames = load_data(args.filename, args.source, cfg)
     if timestamps is None: sys.exit(1)
 
-    state = {'swapped': False, 'text_objs': [], 'im': None, 'cbar': None}
+    state = {
+        'swapped': False, 
+        'playing': False,
+        'text_objs': [], 
+        'im': None, 
+        'cbar': None,
+        'timer': None
+    }
     
     fig, ax = plt.subplots(figsize=(10, 8))
     plt.subplots_adjust(bottom=0.2, top=0.9, left=0.1, right=0.9)
@@ -89,6 +96,10 @@ def main():
     v_mid = (vmin + vmax) / 2.0
 
     def setup_plot():
+        if state['cbar']: 
+            state['cbar'].remove()
+            state['cbar'] = None
+
         ax.clear()
         
         if state['swapped']:
@@ -107,7 +118,6 @@ def main():
         state['im'] = ax.imshow(frame_data, vmin=vmin, vmax=vmax, extent=extent,
                                 origin='lower', interpolation='nearest', cmap='viridis')
 
-        # Set ticks (centers) and grid (edges)
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
         ax.set_xticks(np.linspace(extent[0], extent[1], nx + 1), minor=True)
@@ -132,11 +142,10 @@ def main():
                 row.append(t)
             state['text_objs'].append(row)
 
-        if state['cbar']: state['cbar'].remove()
         state['cbar'] = fig.colorbar(state['im'], ax=ax, fraction=0.046, pad=0.04)
         state['cbar'].set_label('Height (m)')
         
-        update(slider.val)
+        update(slider.val) 
 
     def update(val):
         idx = int(val)
@@ -156,18 +165,57 @@ def main():
         ax.set_title(f"Source: {args.source.title()} | Frame {idx} | T: {t_curr:.2f}s")
         fig.canvas.draw_idle()
 
-    ax_slider = plt.axes([0.2, 0.05, 0.5, 0.03])
+    ax_slider = plt.axes([0.15, 0.1, 0.7, 0.03])
     slider = Slider(ax=ax_slider, label='Frame', valmin=0, valmax=len(frames) - 1, valinit=0, valstep=1)
     slider.on_changed(update)
 
-    ax_btn = plt.axes([0.8, 0.05, 0.1, 0.04])
-    btn = Button(ax_btn, 'Swap X/Y')
-    
+    ax_prev = plt.axes([0.15, 0.04, 0.05, 0.04])
+    btn_prev = Button(ax_prev, '<')
+
+    ax_play = plt.axes([0.21, 0.04, 0.06, 0.04])
+    btn_play = Button(ax_play, 'Play')
+
+    ax_next = plt.axes([0.28, 0.04, 0.05, 0.04])
+    btn_next = Button(ax_next, '>')
+
+    ax_swap = plt.axes([0.75, 0.04, 0.1, 0.04])
+    btn_swap = Button(ax_swap, 'Swap X/Y')
+
     def toggle_swap(event):
         state['swapped'] = not state['swapped']
         setup_plot()
     
-    btn.on_clicked(toggle_swap)
+    def prev_frame(event):
+        new_val = max(0, slider.val - 1)
+        slider.set_val(new_val)
+
+    def next_frame(event):
+        new_val = min(len(frames) - 1, slider.val + 1)
+        slider.set_val(new_val)
+
+    def toggle_play(event):
+        state['playing'] = not state['playing']
+        if state['playing']:
+            btn_play.label.set_text('Pause')
+            state['timer'].start()
+        else:
+            btn_play.label.set_text('Play')
+            state['timer'].stop()
+
+    def on_timer():
+        if state['playing']:
+            new_val = slider.val + 1
+            if new_val >= len(frames):
+                new_val = 0
+            slider.set_val(new_val)
+
+    btn_swap.on_clicked(toggle_swap)
+    btn_prev.on_clicked(prev_frame)
+    btn_next.on_clicked(next_frame)
+    btn_play.on_clicked(toggle_play)
+
+    state['timer'] = fig.canvas.new_timer(interval=100)
+    state['timer'].add_callback(on_timer)
 
     setup_plot()
     print("Visualization started.")
