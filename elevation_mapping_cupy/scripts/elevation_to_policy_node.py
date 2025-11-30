@@ -45,8 +45,6 @@ class ElevationToPolicyNode(Node):
         # Size: [1.0, 0.8], Res: 0.08 -> 13x11 points
         x_points = 13
         y_points = 11
-        # CORRECTION: 12 intervals * 0.08 res = 0.96m. 
-        # (Your snippet had 0.16 which results in 1.92m, contradicting the 0.96m comment)
         x_span = (x_points - 1) * 0.08  # 0.96m 
         y_span = (y_points - 1) * 0.08  # 0.80m
         
@@ -55,7 +53,9 @@ class ElevationToPolicyNode(Node):
         y_coords = np.linspace(-y_span / 2.0, y_span / 2.0, y_points)
         
         # indexing='xy' creates grid_x with shape (Rows=11, Cols=13)
-        grid_x, grid_y = np.meshgrid(x_coords, y_coords) 
+        sensor_offset_x = 0.2 # From training config, sensor is 20cm to the front
+        grid_x, grid_y = np.meshgrid(x_coords, y_coords)
+        grid_x += sensor_offset_x
         
         # Flatten for vector operations (Shape: 143, 2)
         self.query_points_body_frame = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
