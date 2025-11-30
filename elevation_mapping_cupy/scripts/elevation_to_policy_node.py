@@ -39,7 +39,7 @@ class ElevationToPolicyNode(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # Restore print options for troubleshooting
-        np.set_printoptions(floatmode="fixed", precision=4, linewidth=1000)
+        np.set_printoptions(floatmode="fixed", precision=4, linewidth=1000,suppress=True) # For consistent printouts
 
         # Grid definitions matching GridPatternCfg
         # Size: [1.0, 0.8], Res: 0.08 -> 13x11 points
