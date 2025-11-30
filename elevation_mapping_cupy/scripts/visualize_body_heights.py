@@ -129,7 +129,7 @@ def main():
                 ha="center",
                 va="center",
                 color=color,
-                fontsize=6
+                fontsize=8
             )
             row_texts.append(text)
         text_annotations.append(row_texts)
