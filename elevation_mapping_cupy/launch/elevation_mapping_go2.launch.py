@@ -50,13 +50,6 @@ def generate_launch_description():
     )
     use_python_node = LaunchConfiguration('use_python_node')
 
-    store_absolute_z_arg = DeclareLaunchArgument(
-        'store_absolute_z',
-        default_value='false',
-        description='Store raw Z values coming from elevation mapping node in elevation_to_policy_node.'
-    )
-    store_absolute_z = LaunchConfiguration('store_absolute_z')
-
     elevation_mapping_node = Node(
         package='elevation_mapping_cupy',
         executable='elevation_mapping_node',
@@ -92,7 +85,7 @@ def generate_launch_description():
         executable='elevation_to_policy_node.py',
         name='elevation_to_policy_node',
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}, {'store_absolute_z': store_absolute_z}]
+        parameters=[{'use_sim_time': use_sim_time}]
     )
     
     rviz_node = Node(
@@ -108,7 +101,6 @@ def generate_launch_description():
         use_sim_time_arg,
         rviz_config_arg,
         use_python_node_arg,
-        store_absolute_z_arg,
         elevation_mapping_node_py,
         elevation_mapping_node,
         elevation_to_policy_node,

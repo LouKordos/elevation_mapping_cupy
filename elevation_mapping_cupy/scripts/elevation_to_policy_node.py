@@ -16,7 +16,7 @@ from datetime import datetime
 class ElevationToPolicyNode(Node):
     """
     Transforms GridMap data into a body-centric, policy-aligned grid.
-    Writes continuous data streams to timestamped binary files (one per layer).
+    Writes continuous data streams to timestamped binary files (two per layer: abs and rel).
     
     BINARY FORMAT SPECIFICATION (Little Endian '<'):
     
@@ -43,14 +43,32 @@ class ElevationToPolicyNode(Node):
     def __init__(self):
         super().__init__("elevation_to_policy_node")
         
-        self.declare_parameter("store_absolute_z", False)
-        self.store_absolute_z = self.get_parameter("store_absolute_z").get_parameter_value().bool_value
-        
         self.zmq_context = zmq.Context()        
-        self.zmq_pub_raw = self.zmq_context.socket(zmq.PUB)
-        self.zmq_pub_raw.bind("tcp://*:6970")
-        self.zmq_pub_filtered = self.zmq_context.socket(zmq.PUB)
-        self.zmq_pub_filtered.bind("tcp://*:6971")
+        
+        # ZMQ Publishers (6 Total: 3 Layers x [Abs, Rel])
+        # Format: self.zmq_sockets[layer_name][type]
+        self.zmq_sockets = {}
+        
+        # Port map configuration
+        # Base ports: 6970 (Elev), 6972 (Min), 6974 (Smooth)
+        base_ports = {
+            "elevation": 6970,
+            "min_filter": 6972,
+            "smooth": 6974
+        }
+        
+        for layer, port in base_ports.items():
+            self.zmq_sockets[layer] = {}
+            
+            # Absolute socket (Even port)
+            sock_abs = self.zmq_context.socket(zmq.PUB)
+            sock_abs.bind(f"tcp://*:{port}")
+            self.zmq_sockets[layer]["abs"] = sock_abs
+            
+            # Relative socket (Odd port)
+            sock_rel = self.zmq_context.socket(zmq.PUB)
+            sock_rel.bind(f"tcp://*:{port + 1}")
+            self.zmq_sockets[layer]["rel"] = sock_rel
 
         self.map_frame = "odom"
         self.robot_base_frame = "base"
@@ -82,7 +100,7 @@ class ElevationToPolicyNode(Node):
         os.makedirs(self.log_dir, exist_ok=True)
         self.get_logger().info(f"Logging data to: {self.log_dir}")
         
-        # File Handles (Keys: layer_name, Values: file_object)
+        # File Handles (Keys: "layer_type", Values: file_object)
         self.files = {}
         self.data_version = 1
         
@@ -91,46 +109,45 @@ class ElevationToPolicyNode(Node):
         self.file_header_fmt = struct.Struct("< B f f H H 67x")
         
         # Frame Record: Time(d), ID(B), Valid(f), Pose(7f), Reserved(32x)
-        # Note: Grid data is appended raw after this struct
         self.frame_header_fmt = struct.Struct("< d B f 7f 32x")
 
         self.fill_value_body_frame = -0.27
         self.fill_value_absolute = 0.0
 
-        self.create_subscription(GridMap, "/elevation_mapping_node/elevation_map_raw", self.raw_map_callback, 10)
+        # Only one subscription needed
         self.create_subscription(GridMap, "/elevation_mapping_node/elevation_map_filter", self.filtered_map_callback, 10)
         
-        mode_str = "ABSOLUTE" if self.store_absolute_z else "RELATIVE"
-        self.get_logger().info(f"Node Initialized. Mode: {mode_str}. Version: {self.data_version}")
+        self.get_logger().info(f"Node Initialized. Source: elevation_map_filter. Mode: Dual (Abs/Rel).")
 
     def init_log_files(self):
-        """Creates one file per layer using the start timestamp."""
-        timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S.%f") # To avoid special characters in paths
+        """Creates two files per layer (absolute and relative) using the start timestamp."""
+        timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S.%f")
+        sub_types = ["abs", "rel"]
         
         for layer in self.target_layers:
-            filename = f"{timestamp_str}_{layer}.bin"
-            filepath = os.path.join(self.log_dir, filename)
-            try:
-                f = open(filepath, "wb")
+            for st in sub_types:
+                filename = f"{timestamp_str}_{layer}_{st}.bin"
+                filepath = os.path.join(self.log_dir, filename)
+                key = f"{layer}_{st}"
                 
-                # Write Static File Header ONCE
-                header_bytes = self.file_header_fmt.pack(
-                    self.data_version,
-                    self.resolution,
-                    self.sensor_offset_x,
-                    self.x_points,
-                    self.y_points
-                )
-                f.write(header_bytes)
-                f.flush()
-                
-                self.files[layer] = f
-                self.get_logger().info(f"Created log file: {filename}")
-            except Exception as e:
-                self.get_logger().error(f"Failed to create log file {filename}: {e}")
-
-    def raw_map_callback(self, msg: GridMap):
-        self.process_and_publish_zmq(msg, "elevation", self.zmq_pub_raw)
+                try:
+                    f = open(filepath, "wb")
+                    
+                    # Write Static File Header ONCE
+                    header_bytes = self.file_header_fmt.pack(
+                        self.data_version,
+                        self.resolution,
+                        self.sensor_offset_x,
+                        self.x_points,
+                        self.y_points
+                    )
+                    f.write(header_bytes)
+                    f.flush()
+                    
+                    self.files[key] = f
+                    self.get_logger().info(f"Created log file: {filename}")
+                except Exception as e:
+                    self.get_logger().error(f"Failed to create log file {filename}: {e}")
 
     def filtered_map_callback(self, msg: GridMap):
         stamp = msg.header.stamp
@@ -150,34 +167,41 @@ class ElevationToPolicyNode(Node):
 
         # 2. Process Layers
         for layer_name in self.target_layers:
-            # Skip if file handle creation failed earlier
-            if layer_name not in self.files: continue
-
-            result = self.interpolate_layer(msg, layer_name, query_points_odom, robot_z)
+            # Skip if layer not in message (warn handled in interpolate_layer_dual)
+            result = self.interpolate_layer_dual(msg, layer_name, query_points_odom, robot_z)
             
             if result is not None:
-                heights, valid_ratio = result
+                h_abs, h_rel, valid_ratio = result
                 layer_id = self.layer_ids.get(layer_name, 255)
-                f = self.files[layer_name]
 
-                try:
-                    # Write Frame Header
-                    frame_header = self.frame_header_fmt.pack(
-                        timestamp_scalar,
-                        layer_id,
-                        valid_ratio,
-                        *robot_pose
-                    )
-                    f.write(frame_header)
-                    
-                    # Write Grid Data
-                    f.write(heights.tobytes())
-                    f.flush()
-                except Exception as e:
-                    self.get_logger().error(f"Write error for {layer_name}: {e}")
+                # Write & Publish Absolute
+                self.write_frame(layer_name, "abs", layer_id, timestamp_scalar, valid_ratio, robot_pose, h_abs)
+                self.publish_zmq(h_abs, self.zmq_sockets[layer_name]["abs"])
                 
-                if layer_name == "min_filter":
-                    self.publish_zmq(heights, self.zmq_pub_filtered)
+                # Write & Publish Relative
+                self.write_frame(layer_name, "rel", layer_id, timestamp_scalar, valid_ratio, robot_pose, h_rel)
+                self.publish_zmq(h_rel, self.zmq_sockets[layer_name]["rel"])
+
+    def write_frame(self, layer_base, sub_type, layer_id, timestamp, valid_ratio, pose, data):
+        key = f"{layer_base}_{sub_type}"
+        if key not in self.files: return
+        
+        f = self.files[key]
+        try:
+            # Write Frame Header
+            frame_header = self.frame_header_fmt.pack(
+                timestamp,
+                layer_id,
+                valid_ratio,
+                *pose
+            )
+            f.write(frame_header)
+            
+            # Write Grid Data
+            f.write(data.tobytes())
+            f.flush()
+        except Exception as e:
+            self.get_logger().error(f"Write error for {key}: {e}")
 
     def compute_geometry(self, map_pose):
         try:
@@ -207,10 +231,12 @@ class ElevationToPolicyNode(Node):
             self.get_logger().warn(f"TF Lookup Failed: {ex}", throttle_duration_sec=1.0)
             return None
 
-    def interpolate_layer(self, msg: GridMap, layer_name: str, query_points_odom, robot_z):
+    def interpolate_layer_dual(self, msg: GridMap, layer_name: str, query_points_odom, robot_z):
+        """Computes BOTH absolute and relative grids."""
         if layer_name not in msg.layers:
-            if layer_name != "elevation": 
-                self.get_logger().warn(f"Layer '{layer_name}' missing.", throttle_duration_sec=2.0)
+            # Silence warning for Elevation if not explicitly needed, 
+            # though generally Elevation, Min, Smooth should all be in Filtered map.
+            self.get_logger().warn(f"Layer '{layer_name}' missing.", throttle_duration_sec=2.0)
             return None
 
         idx = msg.layers.index(layer_name)
@@ -243,35 +269,21 @@ class ElevationToPolicyNode(Node):
             y_vec = np.flip(y_vec)
             map_data = np.flip(map_data, axis=1)
 
-        fill_value = self.fill_value_absolute if self.store_absolute_z else self.fill_value_body_frame
+        interpolator = RegularGridInterpolator((x_vec, y_vec), map_data, bounds_error=False, fill_value=np.nan)
+        interpolated_raw = interpolator(query_points_odom)
 
-        interpolator = RegularGridInterpolator((x_vec, y_vec), map_data, bounds_error=False, fill_value=fill_value)
-        interpolated_z_abs = interpolator(query_points_odom)
+        valid_mask = ~np.isnan(interpolated_raw)
+        valid_ratio = float(np.sum(valid_mask)) / float(len(interpolated_raw))
 
-        if np.isnan(interpolated_z_abs).any():
-            interpolated_z_abs = np.nan_to_num(interpolated_z_abs, nan=fill_value)
+        # Absolute Grid
+        data_abs = np.full_like(interpolated_raw, self.fill_value_absolute)
+        data_abs[valid_mask] = interpolated_raw[valid_mask]
 
-        valid_mask = ~np.isclose(interpolated_z_abs, fill_value, atol=1e-5)
-        valid_ratio = float(np.sum(valid_mask)) / float(len(interpolated_z_abs))
-
-        if self.store_absolute_z:
-            final_data = interpolated_z_abs.astype(np.float32)
-        else:
-            result = np.full_like(interpolated_z_abs, fill_value)
-            result[valid_mask] = interpolated_z_abs[valid_mask] - robot_z
-            final_data = result.astype(np.float32)
-            
-        return final_data, valid_ratio
-
-    def process_and_publish_zmq(self, msg: GridMap, layer_name: str, zmq_publisher: zmq.Socket):
-        geometry_data = self.compute_geometry(msg.info.pose)
-        if geometry_data is None: return
-        query_points_odom, robot_z, _ = geometry_data
+        # Relative Grid
+        data_rel = np.full_like(interpolated_raw, self.fill_value_body_frame)
+        data_rel[valid_mask] = interpolated_raw[valid_mask] - robot_z
         
-        result = self.interpolate_layer(msg, layer_name, query_points_odom, robot_z)
-        if result is not None:
-            heights, _ = result
-            self.publish_zmq(heights, zmq_publisher)
+        return data_abs.astype(np.float32), data_rel.astype(np.float32), valid_ratio
 
     def publish_zmq(self, heights, zmq_sock):
         payload = heights.tobytes()
@@ -283,11 +295,17 @@ class ElevationToPolicyNode(Node):
         for name, f in self.files.items():
             try:
                 f.close()
-                self.get_logger().info(f"Closed log file for {name}")
             except:
                 pass
-        self.zmq_pub_raw.close()
-        self.zmq_pub_filtered.close()
+        
+        # Close all sockets
+        for layer in self.zmq_sockets:
+            for st in self.zmq_sockets[layer]:
+                try:
+                    self.zmq_sockets[layer][st].close()
+                except:
+                    pass
+                    
         self.zmq_context.term()
         super().destroy_node()
 
