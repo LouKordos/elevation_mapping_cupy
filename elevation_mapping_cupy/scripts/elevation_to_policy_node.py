@@ -70,6 +70,8 @@ class ElevationToPolicyNode(Node):
             sock_rel.bind(f"tcp://*:{port + 1}")
             self.zmq_sockets[layer]["rel"] = sock_rel
 
+            print(f"Started abs socket on port={port} and rel socket on port={port+1} for layer {layer}")
+
         self.map_frame = "odom"
         self.robot_base_frame = "base"
         self.tf_buffer = tf2_ros.Buffer()
@@ -114,7 +116,6 @@ class ElevationToPolicyNode(Node):
         self.fill_value_body_frame = -0.27
         self.fill_value_absolute = 0.0
 
-        # Only one subscription needed
         self.create_subscription(GridMap, "/elevation_mapping_node/elevation_map_filter", self.filtered_map_callback, 10)
         
         self.get_logger().info(f"Node Initialized. Source: elevation_map_filter. Mode: Dual (Abs/Rel).")
@@ -152,52 +153,37 @@ class ElevationToPolicyNode(Node):
     def filtered_map_callback(self, msg: GridMap):
         stamp = msg.header.stamp
         
-        # Initialize files on first callback
         if not self.files:
             self.init_log_files()
 
         timestamp_scalar = stamp.sec + stamp.nanosec * 1e-9
         
-        # 1. Compute Geometry (Shared)
         geometry_data = self.compute_geometry(msg.info.pose)
         if geometry_data is None:
             return
 
         query_points_odom, robot_z, robot_pose = geometry_data
 
-        # 2. Process Layers
         for layer_name in self.target_layers:
             # Skip if layer not in message (warn handled in interpolate_layer_dual)
             result = self.interpolate_layer_dual(msg, layer_name, query_points_odom, robot_z)
-            
             if result is not None:
                 h_abs, h_rel, valid_ratio = result
                 layer_id = self.layer_ids.get(layer_name, 255)
-
-                # Write & Publish Absolute
                 self.write_frame(layer_name, "abs", layer_id, timestamp_scalar, valid_ratio, robot_pose, h_abs)
-                self.publish_zmq(h_abs, self.zmq_sockets[layer_name]["abs"])
-                
-                # Write & Publish Relative
+                self.publish_zmq(h_abs, self.zmq_sockets[layer_name]["abs"], timestamp_scalar)
                 self.write_frame(layer_name, "rel", layer_id, timestamp_scalar, valid_ratio, robot_pose, h_rel)
-                self.publish_zmq(h_rel, self.zmq_sockets[layer_name]["rel"])
+                self.publish_zmq(h_rel, self.zmq_sockets[layer_name]["rel"], timestamp_scalar)
+            else:
+                self.get_logger().warn(f"Interpolation result for layer={layer_name} is None! Not publishing on ZMQ NOR storing in binary file")
 
     def write_frame(self, layer_base, sub_type, layer_id, timestamp, valid_ratio, pose, data):
         key = f"{layer_base}_{sub_type}"
         if key not in self.files: return
-        
         f = self.files[key]
         try:
-            # Write Frame Header
-            frame_header = self.frame_header_fmt.pack(
-                timestamp,
-                layer_id,
-                valid_ratio,
-                *pose
-            )
+            frame_header = self.frame_header_fmt.pack(timestamp, layer_id, valid_ratio, *pose)
             f.write(frame_header)
-            
-            # Write Grid Data
             f.write(data.tobytes())
             f.flush()
         except Exception as e:
@@ -213,7 +199,6 @@ class ElevationToPolicyNode(Node):
             )
             trans = tf_base_to_map.transform.translation
             rot = tf_base_to_map.transform.rotation
-            
             robot_pose = (trans.x, trans.y, trans.z, rot.x, rot.y, rot.z, rot.w)
 
             R_quat = ScipyRotation.from_quat([rot.x, rot.y, rot.z, rot.w])
@@ -226,7 +211,6 @@ class ElevationToPolicyNode(Node):
             query_points_odom = p_rotated + t_base_map_2D
             
             return query_points_odom, trans.z, robot_pose
-
         except TransformException as ex:
             self.get_logger().warn(f"TF Lookup Failed: {ex}", throttle_duration_sec=1.0)
             return None
@@ -234,14 +218,11 @@ class ElevationToPolicyNode(Node):
     def interpolate_layer_dual(self, msg: GridMap, layer_name: str, query_points_odom, robot_z):
         """Computes BOTH absolute and relative grids."""
         if layer_name not in msg.layers:
-            # Silence warning for Elevation if not explicitly needed, 
-            # though generally Elevation, Min, Smooth should all be in Filtered map.
+            # Silence warning for Elevation if not explicitly needed, though generally Elevation, Min, Smooth should all be in Filtered map.
             self.get_logger().warn(f"Layer '{layer_name}' missing.", throttle_duration_sec=2.0)
             return None
 
         idx = msg.layers.index(layer_name)
-        
-        # GridMap Setup
         res = msg.info.resolution
         len_x = msg.info.length_x
         len_y = msg.info.length_y
@@ -261,7 +242,6 @@ class ElevationToPolicyNode(Node):
 
         x_vec = np.linspace(pos_x + len_x/2.0 - res/2.0, pos_x - len_x/2.0 + res/2.0, n_cells_x)
         y_vec = np.linspace(pos_y + len_y/2.0 - res/2.0, pos_y - len_y/2.0 + res/2.0, n_cells_y)
-        
         if x_vec[0] > x_vec[-1]:
             x_vec = np.flip(x_vec)
             map_data = np.flip(map_data, axis=0)
@@ -274,31 +254,25 @@ class ElevationToPolicyNode(Node):
 
         valid_mask = ~np.isnan(interpolated_raw)
         valid_ratio = float(np.sum(valid_mask)) / float(len(interpolated_raw))
-
-        # Absolute Grid
         data_abs = np.full_like(interpolated_raw, self.fill_value_absolute)
         data_abs[valid_mask] = interpolated_raw[valid_mask]
-
-        # Relative Grid
         data_rel = np.full_like(interpolated_raw, self.fill_value_body_frame)
         data_rel[valid_mask] = interpolated_raw[valid_mask] - robot_z
-        
         return data_abs.astype(np.float32), data_rel.astype(np.float32), valid_ratio
 
-    def publish_zmq(self, heights, zmq_sock):
-        payload = heights.tobytes()
-        if len(payload) == self.x_points * self.y_points * 4:
-            zmq_sock.send(payload)
+    def publish_zmq(self, heights, zmq_sock, timestamp_scalar):
+        header = struct.pack("<d", timestamp_scalar) # Used in C++ when writing to file so that timestamps are synchronized
+        payload = header + heights.tobytes()
+        # if len(payload) == self.x_points * self.y_points * 4:
+        zmq_sock.send(payload)
 
     def destroy_node(self):
-        # Close all open files
         for name, f in self.files.items():
             try:
                 f.close()
             except:
                 pass
         
-        # Close all sockets
         for layer in self.zmq_sockets:
             for st in self.zmq_sockets[layer]:
                 try:
