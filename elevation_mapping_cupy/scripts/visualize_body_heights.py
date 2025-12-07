@@ -5,6 +5,7 @@ import struct
 import argparse
 import sys
 import os
+from datetime import datetime
 
 class GridConfig:
     def __init__(self, width_points, height_points, resolution, sensor_off_x):
@@ -33,7 +34,6 @@ class GridConfig:
 def load_data(filename):
     frames_data = []
     
-    # 1. Define Formats
     # File Header: Ver(B), Res(f), OffX(f), nx(H), ny(H), 67x(Pad) -> 80 Bytes
     file_header_struct = struct.Struct('< B f f H H 67x')
     
@@ -44,26 +44,20 @@ def load_data(filename):
 
     try:
         with open(filename, 'rb') as f:
-            # --- READ STATIC FILE HEADER (ONCE) ---
             file_header_bytes = f.read(file_header_struct.size)
             if len(file_header_bytes) < file_header_struct.size:
                 print("Error: File too short for header.")
                 return None, None
 
             (ver, res, off_x, nx, ny) = file_header_struct.unpack(file_header_bytes)
-            
-            # Create Config Object based on file header
             config = GridConfig(nx, ny, res, off_x)
-            
             # Calculate dynamic data size
             num_points = nx * ny
             grid_body_size = num_points * 4 # 4 bytes per float
 
             print(f"File Header: Ver={ver}, Grid={nx}x{ny}, Res={res:.3f}m")
 
-            # --- READ FRAMES LOOP ---
             while True:
-                # A. Read Frame Header
                 frame_header_bytes = f.read(frame_header_struct.size)
                 if len(frame_header_bytes) < frame_header_struct.size:
                     break # EOF
@@ -71,7 +65,6 @@ def load_data(filename):
                 (ts, lid, valid, 
                  rx, ry, rz, rqx, rqy, rqz, rqw) = frame_header_struct.unpack(frame_header_bytes)
 
-                # B. Read Grid Data
                 grid_bytes = f.read(grid_body_size)
                 if len(grid_bytes) < grid_body_size:
                     print("Warning: Incomplete frame body at EOF.")
@@ -87,6 +80,9 @@ def load_data(filename):
                     'quat': (rqx, rqy, rqz, rqw),
                     'grid': flat_data.reshape(ny, nx)
                 })
+
+        print(f"First timestamp in unix seconds.nanoseconds={frames_data[0]['timestamp']}")
+        print(f"Last timestamp in unix seconds.nanoseconds={frames_data[-1]['timestamp']}")
 
     except FileNotFoundError:
         print(f"Error: File not found at {filename}")
@@ -113,7 +109,7 @@ def main():
     # State container
     state = {
         'swapped': False, 
-        'unit': 'm',      # 'm' or 'cm'
+        'unit': 'm', # 'm' or 'cm'
         'playing': False,
         'text_objs': [], 
         'im': None, 
@@ -135,7 +131,6 @@ def main():
         frame = frames[frame_idx]
         raw_data = frame['grid']
         
-        # 1. Determine Scale Factor
         if state['unit'] == 'cm':
             scale = 100.0
             unit_label = "cm"
@@ -145,11 +140,9 @@ def main():
             unit_label = "m"
             fmt_str = "{:.3f}" 
 
-        # 2. Scale Global Limits
         curr_vmin = global_vmin_m * scale
         curr_vmax = global_vmax_m * scale
         
-        # 3. Handle View Transformation
         if state['swapped']:
             data = np.flip(raw_data.T, axis=1) * scale
             screen_x_ticks = np.flip(cfg.y_centers) * scale
@@ -263,7 +256,6 @@ def main():
         layer_name = layer_names.get(meta['layer_id'], "Unknown")
         rx, ry, rz = meta['pose']
         
-        # Note: cfg.res is now used from the Config object
         title_str = (
             f"Frame {idx} | T: {t_curr:.2f}s | Layer: {layer_name}\n"
             f"Valid: {meta['validity']*100:.1f}% | Res: {cfg.res:.2f}m\n"
@@ -272,7 +264,6 @@ def main():
         ax.set_title(title_str, fontsize=10)
         fig.canvas.draw_idle()
 
-    # --- UI Components ---
     ax_slider = plt.axes([0.15, 0.08, 0.7, 0.03])
     slider = Slider(ax=ax_slider, label='Frame', valmin=0, valmax=len(frames) - 1, valinit=0, valstep=1)
     
