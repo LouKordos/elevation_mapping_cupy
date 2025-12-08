@@ -158,7 +158,7 @@ class ElevationToPolicyNode(Node):
 
         timestamp_scalar = stamp.sec + stamp.nanosec * 1e-9
         
-        geometry_data = self.compute_geometry(msg.info.pose)
+        geometry_data = self.compute_geometry(msg.info.pose, stamp)
         if geometry_data is None:
             return
 
@@ -189,12 +189,14 @@ class ElevationToPolicyNode(Node):
         except Exception as e:
             self.get_logger().error(f"Write error for {key}: {e}")
 
-    def compute_geometry(self, map_pose):
+    def compute_geometry(self, map_pose, timestamp_ros):
         try:
+            lookup_time = rclpy.time.Time.from_msg(timestamp_ros)
+            lookup_time = rclpy.time.Time()
             tf_base_to_map = self.tf_buffer.lookup_transform(
                 target_frame=self.map_frame, 
                 source_frame=self.robot_base_frame, 
-                time=rclpy.time.Time(), 
+                time=lookup_time, # Use latest time to avoid waiting for data!
                 timeout=Duration(seconds=0.1)
             )
             trans = tf_base_to_map.transform.translation
