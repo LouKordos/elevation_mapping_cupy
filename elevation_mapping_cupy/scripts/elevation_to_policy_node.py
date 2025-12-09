@@ -12,6 +12,7 @@ from scipy.interpolate import RegularGridInterpolator
 import os
 import struct
 from datetime import datetime
+from datetime import timezone
 
 class ElevationToPolicyNode(Node):
     """
@@ -122,7 +123,7 @@ class ElevationToPolicyNode(Node):
 
     def init_log_files(self):
         """Creates two files per layer (absolute and relative) using the start timestamp."""
-        timestamp_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S.%f")
+        timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%f")
         sub_types = ["abs", "rel"]
         
         for layer in self.target_layers:

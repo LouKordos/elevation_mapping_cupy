@@ -6,7 +6,7 @@ import argparse
 import sys
 import os
 from datetime import datetime
-
+from datetime import timezone
 class GridConfig:
     def __init__(self, width_points, height_points, resolution, sensor_off_x):
         self.nx = width_points
@@ -258,7 +258,7 @@ def main():
         
         title_str = (
             f"Frame {idx} | T: {t_curr:.2f}s | Layer: {layer_name}\n"
-            f"{datetime.strftime(datetime.fromtimestamp(meta['timestamp']), '%Y-%m-%dT%H-%M-%S.%f')} | Valid: {meta['validity']*100:.1f}% | Res: {cfg.res:.2f}m\n"
+            f"{datetime.strftime(datetime.fromtimestamp(meta['timestamp'],tz=timezone.utc), '%Y-%m-%dT%H-%M-%S.%f')} | Valid: {meta['validity']*100:.1f}% | Res: {cfg.res:.2f}m\n"
             f"Robot Pose: X={rx:.2f}, Y={ry:.2f}, Z={rz:.2f}"
         )
         ax.set_title(title_str, fontsize=10)
