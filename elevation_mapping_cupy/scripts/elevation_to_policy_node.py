@@ -10,279 +10,312 @@ from tf2_ros import TransformException
 from scipy.spatial.transform import Rotation as ScipyRotation
 from scipy.interpolate import RegularGridInterpolator
 import os
-import struct
-from datetime import datetime
-from datetime import timezone
+import json
+import threading
+import queue
+from datetime import datetime, timezone
+
+class NumpyEncoder(json.JSONEncoder):
+    """
+    Ensures numpy types are converted to native python types for JSON serialization.
+    Preserves precision by using Python's default float repr.
+    """
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        return super(NumpyEncoder, self).default(obj)
 
 class ElevationToPolicyNode(Node):
-    """
-    Transforms GridMap data into a body-centric, policy-aligned grid.
-    Writes continuous data streams to timestamped binary files (two per layer: abs and rel).
-    
-    BINARY FORMAT SPECIFICATION (Little Endian '<'):
-    
-    [FILE HEADER] - Written ONCE at start of file (Size: 80 Bytes)
-    | Offset | Type     | Name           | Description                          |
-    |--------|----------|----------------|--------------------------------------|
-    | 0      | uint8    | version        | Current: 1                           |
-    | 1      | float32  | resolution     | Grid resolution (e.g., 0.08)         |
-    | 5      | float32  | sensor_off_x   | Sensor offset (e.g., 0.2)            |
-    | 9      | uint16   | num_x          | Grid Width                           |
-    | 11     | uint16   | num_y          | Grid Height                          |
-    | 13     | 67 bytes | reserved_file  | Padding for future static configs    |
-    
-    [FRAME RECORD] - Written REPEATEDLY for every timestep (Size: Variable)
-    | Offset | Type     | Name           | Description                          |
-    |--------|----------|----------------|--------------------------------------|
-    | 0      | double   | timestamp      | Unix time (sec.nanosec)              |
-    | 8      | uint8    | layer_id       | 0=elev, 1=min, 2=smooth              |
-    | 9      | float32  | valid_ratio    | 0.0-1.0 (integrity check)            |
-    | 13     | 7x float | robot_pose     | x, y, z, qx, qy, qz, qw              |
-    | 41     | 32 bytes | reserved_frame | Padding for future frame data        |
-    | 73     | N x flt  | grid_data      | Flattened grid (N = num_x * num_y)   |
-    """
     def __init__(self):
         super().__init__("elevation_to_policy_node")
         
-        self.zmq_context = zmq.Context()        
+        self.map_frame = "odom"
+        self.robot_base_frame = "base"
+        self.foot_frames = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
         
-        # ZMQ Publishers (6 Total: 3 Layers x [Abs, Rel])
-        # Format: self.zmq_sockets[layer_name][type]
+        self.grid_points_x = 13
+        self.grid_points_y = 11
+        self.grid_resolution = 0.08
+        self.sensor_offset_x = 0.2
+        self.fill_value_body_frame = -0.27
+        self.fill_value_absolute = 0.0
+        
+        self.zmq_context = zmq.Context()        
         self.zmq_sockets = {}
         
-        # Port map configuration
-        # Base ports: 6970 (Elev), 6972 (Min), 6974 (Smooth)
         base_ports = {
             "elevation": 6970,
             "min_filter": 6972,
             "smooth": 6974
         }
         
-        for layer, port in base_ports.items():
-            self.zmq_sockets[layer] = {}
+        for layer_name, port_number in base_ports.items():
+            self.zmq_sockets[layer_name] = {}
             
-            # Absolute socket (Even port)
-            sock_abs = self.zmq_context.socket(zmq.PUB)
-            sock_abs.bind(f"tcp://*:{port}")
-            self.zmq_sockets[layer]["abs"] = sock_abs
+            socket_absolute = self.zmq_context.socket(zmq.PUB)
+            socket_absolute.bind(f"tcp://*:{port_number}")
+            self.zmq_sockets[layer_name]["abs"] = socket_absolute
             
-            # Relative socket (Odd port)
-            sock_rel = self.zmq_context.socket(zmq.PUB)
-            sock_rel.bind(f"tcp://*:{port + 1}")
-            self.zmq_sockets[layer]["rel"] = sock_rel
+            socket_relative = self.zmq_context.socket(zmq.PUB)
+            socket_relative.bind(f"tcp://*:{port_number + 1}")
+            self.zmq_sockets[layer_name]["rel"] = socket_relative
 
-            print(f"Started abs socket on port={port} and rel socket on port={port+1} for layer {layer}")
+            print(f"ZMQ Init: {layer_name} (Abs: {port_number}, Rel: {port_number+1})")
 
-        self.map_frame = "odom"
-        self.robot_base_frame = "base"
+        np.set_printoptions(suppress=True)
+        x_span = (self.grid_points_x - 1) * self.grid_resolution  
+        y_span = (self.grid_points_y - 1) * self.grid_resolution
+        x_coords = np.linspace(-x_span / 2.0, x_span / 2.0, self.grid_points_x) 
+        y_coords = np.linspace(-y_span / 2.0, y_span / 2.0, self.grid_points_y)
+        grid_mesh_x, grid_mesh_y = np.meshgrid(x_coords, y_coords)
+        grid_mesh_x += self.sensor_offset_x
+        self.query_points_body_frame = np.vstack([grid_mesh_x.ravel(), grid_mesh_y.ravel()]).T
+        
+        self.target_layers = ["elevation", "min_filter", "smooth"]
+        
+        current_working_directory = os.getcwd()
+        self.log_directory = os.path.join(current_working_directory, "elevation_to_policy_logs_json")
+        os.makedirs(self.log_directory, exist_ok=True)
+        
+        self.active_file_handles = {}
+        
+        self.write_queue = queue.Queue() 
+        self.is_running = True
+        self.io_thread = threading.Thread(target=self._io_worker, daemon=True)
+        self.io_thread.start()
+
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-        np.set_printoptions(floatmode="fixed", precision=4, linewidth=1000, suppress=True)
-
-        # --- Grid Config ---
-        self.x_points = 13
-        self.y_points = 11
-        self.resolution = 0.08
-        self.sensor_offset_x = 0.2
-        
-        x_span = (self.x_points - 1) * self.resolution  
-        y_span = (self.y_points - 1) * self.resolution
-        x_coords = np.linspace(-x_span / 2.0, x_span / 2.0, self.x_points) 
-        y_coords = np.linspace(-y_span / 2.0, y_span / 2.0, self.y_points)
-        grid_x, grid_y = np.meshgrid(x_coords, y_coords)
-        grid_x += self.sensor_offset_x
-        self.query_points_body_frame = np.vstack([grid_x.ravel(), grid_y.ravel()]).T
-        
-        # --- File I/O Config ---
-        self.target_layers = ["elevation", "min_filter", "smooth"]
-        self.layer_ids = {"elevation": 0, "min_filter": 1, "smooth": 2}
-        
-        cwd = os.getcwd()
-        self.log_dir = os.path.join(cwd, "elevation_to_policy_conversion_logs")
-        os.makedirs(self.log_dir, exist_ok=True)
-        self.get_logger().info(f"Logging data to: {self.log_dir}")
-        
-        # File Handles (Keys: "layer_type", Values: file_object)
-        self.files = {}
-        self.data_version = 1
-        
-        # Structs
-        # File Header: Version(B), Res(f), OffX(f), nx(H), ny(H), Reserved(67x)
-        self.file_header_fmt = struct.Struct("< B f f H H 67x")
-        
-        # Frame Record: Time(d), ID(B), Valid(f), Pose(7f), Reserved(32x)
-        self.frame_header_fmt = struct.Struct("< d B f 7f 32x")
-
-        self.fill_value_body_frame = -0.27
-        self.fill_value_absolute = 0.0
-
         self.create_subscription(GridMap, "/elevation_mapping_node/elevation_map_filter", self.filtered_map_callback, 10)
         
-        self.get_logger().info(f"Node Initialized. Source: elevation_map_filter. Mode: Dual (Abs/Rel).")
+        self.get_logger().info(f"Initialized. Logging NDJSON to: {self.log_directory}")
 
     def init_log_files(self):
-        """Creates two files per layer (absolute and relative) using the start timestamp."""
-        timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%f")
-        sub_types = ["abs", "rel"]
+        """Creates file handles and writes the Metadata Header line."""
+        timestamp_string = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S.%f")
+        layer_types = ["abs", "rel"]
         
-        for layer in self.target_layers:
-            for st in sub_types:
-                filename = f"{timestamp_str}_{layer}_{st}.bin"
-                filepath = os.path.join(self.log_dir, filename)
-                key = f"{layer}_{st}"
+        for layer_name in self.target_layers:
+            for layer_type in layer_types:
+                filename = f"{timestamp_string}_{layer_name}_{layer_type}.jsonl"
+                filepath = os.path.join(self.log_directory, filename)
+                file_key = f"{layer_name}_{layer_type}"
                 
                 try:
-                    f = open(filepath, "wb")
+                    log_file = open(filepath, "w", encoding='utf-8')
+                    fill_value = float(self.fill_value_absolute if layer_type == "abs" else self.fill_value_body_frame)
+
+                    metadata = {
+                        "type": "metadata",
+                        "version": 3,
+                        "config": {
+                            "resolution": self.grid_resolution,
+                            "sensor_offset_x": self.sensor_offset_x,
+                            "num_x": int(self.grid_points_x),
+                            "num_y": int(self.grid_points_y),
+                            "fill_value": fill_value
+                        }
+                    }
                     
-                    # Write Static File Header ONCE
-                    header_bytes = self.file_header_fmt.pack(
-                        self.data_version,
-                        self.resolution,
-                        self.sensor_offset_x,
-                        self.x_points,
-                        self.y_points
-                    )
-                    f.write(header_bytes)
-                    f.flush()
-                    
-                    self.files[key] = f
+                    log_file.write(json.dumps(metadata) + "\n")
+                    log_file.flush()
+                    self.active_file_handles[file_key] = log_file
                     self.get_logger().info(f"Created log file: {filename}")
                 except Exception as e:
                     self.get_logger().error(f"Failed to create log file {filename}: {e}")
 
-    def filtered_map_callback(self, msg: GridMap):
-        stamp = msg.header.stamp
-        
-        if not self.files:
-            self.init_log_files()
+    def _io_worker(self):
+        while self.is_running:
+            try:
+                queue_item = self.write_queue.get(timeout=1.0) 
+                file_key, json_string_data = queue_item
+                
+                if file_key in self.active_file_handles:
+                    log_file = self.active_file_handles[file_key]
+                    log_file.write(json_string_data + "\n")
+                    log_file.flush()
+                
+                self.write_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Async Write Error: {e}")
 
+    def filtered_map_callback(self, grid_map_message: GridMap):
+        if not self.active_file_handles:
+            self.init_log_files()
+            
+        stamp = grid_map_message.header.stamp
         timestamp_scalar = stamp.sec + stamp.nanosec * 1e-9
-        
-        geometry_data = self.compute_geometry(msg.info.pose, stamp)
+        geometry_data = self.compute_geometry(grid_map_message.info.pose, stamp)
         if geometry_data is None:
+            self.get_logger().warn("Failed to get transformed points, returning in subscriber callback!")
             return
 
-        query_points_odom, robot_z, robot_pose = geometry_data
+        query_points_odom, robot_height_z, robot_pose_tuple = geometry_data
+        pose_dictionary = {
+            "x": robot_pose_tuple[0], "y": robot_pose_tuple[1], "z": robot_pose_tuple[2],
+            "qx": robot_pose_tuple[3], "qy": robot_pose_tuple[4], "qz": robot_pose_tuple[5], "qw": robot_pose_tuple[6]
+        }
+        feet_positions_list = self.get_foot_positions()
 
         for layer_name in self.target_layers:
-            # Skip if layer not in message (warn handled in interpolate_layer_dual)
-            result = self.interpolate_layer_dual(msg, layer_name, query_points_odom, robot_z)
-            if result is not None:
-                h_abs, h_rel, valid_ratio = result
-                layer_id = self.layer_ids.get(layer_name, 255)
-                self.write_frame(layer_name, "abs", layer_id, timestamp_scalar, valid_ratio, robot_pose, h_abs)
-                self.publish_zmq(h_abs, self.zmq_sockets[layer_name]["abs"], timestamp_scalar)
-                self.write_frame(layer_name, "rel", layer_id, timestamp_scalar, valid_ratio, robot_pose, h_rel)
-                self.publish_zmq(h_rel, self.zmq_sockets[layer_name]["rel"], timestamp_scalar)
-            else:
-                self.get_logger().warn(f"Interpolation result for layer={layer_name} is None! Not publishing on ZMQ NOR storing in binary file")
+            interpolation_result = self.interpolate_layer_dual(grid_map_message, layer_name, query_points_odom, robot_height_z)
+            
+            if interpolation_result is not None:
+                grid_absolute, grid_relative, valid_ratio = interpolation_result
+                
+                packet_absolute = {
+                    "ts": timestamp_scalar,
+                    "layer": layer_name,
+                    "type": "abs",
+                    "valid": valid_ratio,
+                    "pose": pose_dictionary,
+                    "feet": feet_positions_list,
+                    "grid": grid_absolute
+                }
+                self.dispatch_data(layer_name, "abs", packet_absolute)
+                
+                packet_relative = {
+                    "ts": timestamp_scalar,
+                    "layer": layer_name,
+                    "type": "rel",
+                    "valid": valid_ratio,
+                    "pose": pose_dictionary,
+                    "feet": feet_positions_list,
+                    "grid": grid_relative
+                }
+                self.dispatch_data(layer_name, "rel", packet_relative)
 
-    def write_frame(self, layer_base, sub_type, layer_id, timestamp, valid_ratio, pose, data):
-        key = f"{layer_base}_{sub_type}"
-        if key not in self.files: return
-        f = self.files[key]
+    def dispatch_data(self, layer_name, layer_type, data_dictionary):
         try:
-            frame_header = self.frame_header_fmt.pack(timestamp, layer_id, valid_ratio, *pose)
-            f.write(frame_header)
-            f.write(data.tobytes())
-            f.flush()
+            json_string_payload = json.dumps(data_dictionary, cls=NumpyEncoder, separators=(',', ':'))
+            
+            self.zmq_sockets[layer_name][layer_type].send(json_string_payload.encode('utf-8'))
+            
+            file_key = f"{layer_name}_{layer_type}"
+            if file_key in self.active_file_handles:
+                self.write_queue.put((file_key, json_string_payload))
+                
         except Exception as e:
-            self.get_logger().error(f"Write error for {key}: {e}")
+            self.get_logger().error(f"Dispatch Error: {e}")
+
+    def get_foot_positions(self):
+        feet_coordinates = []
+        lookup_time = rclpy.time.Time()
+        
+        for foot_frame in self.foot_frames:
+            try:
+                transform_stamped = self.tf_buffer.lookup_transform(
+                    target_frame=self.robot_base_frame,
+                    source_frame=foot_frame,
+                    time=lookup_time,
+                    timeout=Duration(seconds=0.005)
+                )
+                feet_coordinates.extend([
+                    transform_stamped.transform.translation.x,
+                    transform_stamped.transform.translation.y,
+                    transform_stamped.transform.translation.z
+                ])
+            except TransformException:
+                self.get_logger().warn("Failed to get foot positions!")
+                feet_coordinates.extend([None, None, None])
+        return feet_coordinates
 
     def compute_geometry(self, map_pose, timestamp_ros):
         try:
-            lookup_time = rclpy.time.Time.from_msg(timestamp_ros)
             lookup_time = rclpy.time.Time()
             tf_base_to_map = self.tf_buffer.lookup_transform(
                 target_frame=self.map_frame, 
                 source_frame=self.robot_base_frame, 
-                time=lookup_time, # Use latest time to avoid waiting for data!
-                timeout=Duration(seconds=0.1)
+                time=lookup_time,
+                timeout=Duration(seconds=0.005)
             )
-            trans = tf_base_to_map.transform.translation
-            rot = tf_base_to_map.transform.rotation
-            robot_pose = (trans.x, trans.y, trans.z, rot.x, rot.y, rot.z, rot.w)
+            translation = tf_base_to_map.transform.translation
+            rotation = tf_base_to_map.transform.rotation
+            robot_pose_tuple = (translation.x, translation.y, translation.z, rotation.x, rotation.y, rotation.z, rotation.w)
 
-            R_quat = ScipyRotation.from_quat([rot.x, rot.y, rot.z, rot.w])
-            yaw = R_quat.as_euler("zxy")[0] 
-            c, s = np.cos(yaw), np.sin(yaw)
-            R_yaw_2D = np.array([[c, -s], [s, c]])
+            rotation_object = ScipyRotation.from_quat([rotation.x, rotation.y, rotation.z, rotation.w])
+            yaw_angle = rotation_object.as_euler("zxy")[0] 
+            cosine_yaw, sine_yaw = np.cos(yaw_angle), np.sin(yaw_angle)
+            rotation_matrix_2d = np.array([[cosine_yaw, -sine_yaw], [sine_yaw, cosine_yaw]])
             
-            t_base_map_2D = np.array([trans.x, trans.y])
-            p_rotated = self.query_points_body_frame @ R_yaw_2D.T 
-            query_points_odom = p_rotated + t_base_map_2D
+            translation_base_map_2d = np.array([translation.x, translation.y])
+            points_rotated = self.query_points_body_frame @ rotation_matrix_2d.T 
+            query_points_odom = points_rotated + translation_base_map_2d
             
-            return query_points_odom, trans.z, robot_pose
+            return query_points_odom, translation.z, robot_pose_tuple
         except TransformException as ex:
-            self.get_logger().warn(f"TF Lookup Failed: {ex}", throttle_duration_sec=1.0)
+            self.get_logger().error(f"TF Lookup Failed (Base->Map): {ex}")
             return None
 
-    def interpolate_layer_dual(self, msg: GridMap, layer_name: str, query_points_odom, robot_z):
-        """Computes BOTH absolute and relative grids."""
-        if layer_name not in msg.layers:
-            # Silence warning for Elevation if not explicitly needed, though generally Elevation, Min, Smooth should all be in Filtered map.
-            self.get_logger().warn(f"Layer '{layer_name}' missing.", throttle_duration_sec=2.0)
+    def interpolate_layer_dual(self, grid_map_message: GridMap, layer_name: str, query_points_odom, robot_height_z):
+        if layer_name not in grid_map_message.layers:
             return None
 
-        idx = msg.layers.index(layer_name)
-        res = msg.info.resolution
-        len_x = msg.info.length_x
-        len_y = msg.info.length_y
-        pos_x = msg.info.pose.position.x
-        pos_y = msg.info.pose.position.y
-        n_cells_x = int(round(len_x / res))
-        n_cells_y = int(round(len_y / res))
+        layer_index = grid_map_message.layers.index(layer_name)
+        resolution = grid_map_message.info.resolution
+        length_x = grid_map_message.info.length_x
+        length_y = grid_map_message.info.length_y
+        position_x = grid_map_message.info.pose.position.x
+        position_y = grid_map_message.info.pose.position.y
+        num_cells_x = int(round(length_x / resolution))
+        num_cells_y = int(round(length_y / resolution))
         
-        data_flat = np.array(msg.data[idx].data, dtype=np.float32)
+        data_flat = np.array(grid_map_message.data[layer_index].data, dtype=np.float32)
         try:
-            map_data = data_flat.reshape(n_cells_y, n_cells_x).T
+            map_data_grid = data_flat.reshape(num_cells_y, num_cells_x).T
         except ValueError:
             return None
 
-        if not np.any(np.isfinite(map_data)):
+        if not np.any(np.isfinite(map_data_grid)):
              return None
 
-        x_vec = np.linspace(pos_x + len_x/2.0 - res/2.0, pos_x - len_x/2.0 + res/2.0, n_cells_x)
-        y_vec = np.linspace(pos_y + len_y/2.0 - res/2.0, pos_y - len_y/2.0 + res/2.0, n_cells_y)
-        if x_vec[0] > x_vec[-1]:
-            x_vec = np.flip(x_vec)
-            map_data = np.flip(map_data, axis=0)
-        if y_vec[0] > y_vec[-1]:
-            y_vec = np.flip(y_vec)
-            map_data = np.flip(map_data, axis=1)
+        x_vector = np.linspace(position_x + length_x/2.0 - resolution/2.0, position_x - length_x/2.0 + resolution/2.0, num_cells_x)
+        y_vector = np.linspace(position_y + length_y/2.0 - resolution/2.0, position_y - length_y/2.0 + resolution/2.0, num_cells_y)
+        
+        if x_vector[0] > x_vector[-1]:
+            x_vector = np.flip(x_vector)
+            map_data_grid = np.flip(map_data_grid, axis=0)
+        if y_vector[0] > y_vector[-1]:
+            y_vector = np.flip(y_vector)
+            map_data_grid = np.flip(map_data_grid, axis=1)
 
-        interpolator = RegularGridInterpolator((x_vec, y_vec), map_data, bounds_error=False, fill_value=np.nan)
-        interpolated_raw = interpolator(query_points_odom)
+        interpolator = RegularGridInterpolator((x_vector, y_vector), map_data_grid, bounds_error=False, fill_value=np.nan)
+        interpolated_raw_values = interpolator(query_points_odom)
 
-        valid_mask = ~np.isnan(interpolated_raw)
-        valid_ratio = float(np.sum(valid_mask)) / float(len(interpolated_raw))
-        data_abs = np.full_like(interpolated_raw, self.fill_value_absolute)
-        data_abs[valid_mask] = interpolated_raw[valid_mask]
-        data_rel = np.full_like(interpolated_raw, self.fill_value_body_frame)
-        data_rel[valid_mask] = interpolated_raw[valid_mask] - robot_z
-        return data_abs.astype(np.float32), data_rel.astype(np.float32), valid_ratio
-
-    def publish_zmq(self, heights, zmq_sock, timestamp_scalar):
-        header = struct.pack("<d", timestamp_scalar) # Used in C++ when writing to file so that timestamps are synchronized
-        payload = header + heights.tobytes()
-        # if len(payload) == self.x_points * self.y_points * 4:
-        zmq_sock.send(payload)
+        valid_mask = ~np.isnan(interpolated_raw_values)
+        valid_ratio = float(np.sum(valid_mask)) / float(len(interpolated_raw_values))
+        
+        data_absolute = np.full_like(interpolated_raw_values, self.fill_value_absolute)
+        data_absolute[valid_mask] = interpolated_raw_values[valid_mask]
+        
+        data_relative = np.full_like(interpolated_raw_values, self.fill_value_body_frame)
+        data_relative[valid_mask] = interpolated_raw_values[valid_mask] - robot_height_z
+        
+        return data_absolute, data_relative, valid_ratio
 
     def destroy_node(self):
-        for name, f in self.files.items():
+        self.is_running = False
+        if self.io_thread.is_alive():
+            self.io_thread.join(timeout=2.0)
+            
+        for key, file_handle in self.active_file_handles.items():
             try:
-                f.close()
+                file_handle.close()
             except:
                 pass
         
         for layer in self.zmq_sockets:
-            for st in self.zmq_sockets[layer]:
+            for layer_type in self.zmq_sockets[layer]:
                 try:
-                    self.zmq_sockets[layer][st].close()
+                    self.zmq_sockets[layer][layer_type].close()
                 except:
                     pass
-                    
         self.zmq_context.term()
         super().destroy_node()
 
