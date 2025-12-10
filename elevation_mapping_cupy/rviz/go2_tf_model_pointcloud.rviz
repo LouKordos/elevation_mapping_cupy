@@ -55,10 +55,10 @@ Visualization Manager:
       Autocompute Intensity Bounds: true
       Class: grid_map_rviz_plugin/GridMap
       Color: 200; 200; 200
-      Color Layer: elevation
+      Color Layer: smooth
       Color Transformer: ""
       Enabled: true
-      Height Layer: elevation
+      Height Layer: smooth
       Height Transformer: GridMapLayer
       History Length: 1
       Invert Rainbow: false
@@ -74,7 +74,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /elevation_mapping_node/elevation_map_raw
+        Value: /elevation_mapping_node/elevation_map_filter
       Use Rainbow: true
       Value: true
     - Class: rviz_default_plugins/TF
