@@ -104,7 +104,7 @@ class ElevationToPolicyNode(Node):
         # Shared memory for the latest map interpolator
         self.latest_map_context = None
         self.map_lock = threading.Lock()
-        self.create_timer(1.0 / 100.0, self.publish_timer_callback)
+        self.create_timer(1.0 / 50.0, self.publish_timer_callback)
         self.get_logger().info(f"Initialized. Logging NDJSON to: {self.log_directory}")
 
     def init_log_files(self):
