@@ -50,7 +50,6 @@ def load_data(filename):
 
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            # --- 1. Read Metadata (Header) ---
             try:
                 header_line = f.readline()
                 if not header_line:
@@ -78,7 +77,6 @@ def load_data(filename):
                 print(f"Error decoding metadata header: {e}")
                 return None, None
 
-            # --- 2. Read Frames ---
             for line_idx, line in enumerate(f):
                 line = line.strip()
                 if not line: continue
