@@ -412,6 +412,17 @@ class ElevationToPolicyNode(Node):
             y_vector = np.flip(y_vector)
             map_data_grid = np.flip(map_data_grid, axis=1)
 
+        DEBUG_RAW_VALUES = False
+        if DEBUG_RAW_VALUES and layer_name == "smooth":
+            # Slice Front Half (Mid -> End) and Downsample (Step 2)
+            # map_data_grid is (X, Y). x-axis is forward.
+            mid_idx = map_data_grid.shape[0] // 2
+            front_raw_downsampled = (map_data_grid[mid_idx::2, ::2] + 0.0) * 100.0
+            # Configure Numpy to print EVERYTHING (no truncation)
+            # linewidth=400 attempts to keep rows on one line in wide terminals
+            np.set_printoptions(threshold=20000, linewidth=400, precision=1, suppress=True)
+            print(front_raw_downsampled)
+
         try:
             interpolator = RegularGridInterpolator((x_vector, y_vector), map_data_grid, bounds_error=False, fill_value=np.nan)
             return interpolator
