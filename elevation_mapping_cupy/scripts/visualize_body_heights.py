@@ -87,6 +87,7 @@ def load_data(filename):
                     # Basic Fields
                     ts = frame.get("ts", 0.0)
                     layer_str = frame.get("layer", "unknown")
+                    layer_type = frame.get("type", "unknown")
                     lid = layer_map.get(layer_str, 255) # Default to 255 if unknown
                     valid = frame.get("valid", 0.0)
                     
@@ -122,6 +123,7 @@ def load_data(filename):
                     frames_data.append({
                         'timestamp': ts,
                         'layer_id': lid,
+                        'type': layer_type,
                         'validity': valid,
                         'pose': (rx, ry, rz),
                         'quat': (rqx, rqy, rqz, rqw),
@@ -198,8 +200,20 @@ def main():
             unit_label = "m"
             fmt_str = "{:.3f}" 
 
-        curr_vmin = global_vmin_m * scale
-        curr_vmax = global_vmax_m * scale
+        ABS_RANGE = (-0.1, 0.2) # meters
+        REL_RANGE = (-0.5, 0) # meters
+        USE_HARDCODED_RANGE = True
+        if 'rel' in frame.get("layer_type", ""):
+            target_min, target_max = REL_RANGE
+        else:
+            target_min, target_max = ABS_RANGE
+
+        if USE_HARDCODED_RANGE:
+            curr_vmin = target_min * scale
+            curr_vmax = target_max * scale
+        else:
+            curr_vmin = global_vmin_m * scale
+            curr_vmax = global_vmax_m * scale
         
         is_fill = np.isclose(raw_data, cfg.fill_value, atol=1e-5)
         masked_data = np.ma.masked_where(is_fill, raw_data)
