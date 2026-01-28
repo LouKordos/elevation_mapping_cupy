@@ -200,7 +200,7 @@ def main():
             unit_label = "m"
             fmt_str = "{:.3f}" 
 
-        ABS_RANGE = (-0.1, 0.2) # meters
+        ABS_RANGE = (-0.02, 0.15) # meters
         REL_RANGE = (-0.5, 0) # meters
         USE_HARDCODED_RANGE = True
         if 'rel' in frame.get("layer_type", ""):
