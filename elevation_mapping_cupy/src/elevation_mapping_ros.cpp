@@ -505,7 +505,7 @@ void ElevationMappingNode::inputPointCloud(const sensor_msgs::msg::PointCloud2::
     auto timeStamp = cloud->header.stamp;
     Eigen::Affine3d transformationSensorToMap;
     try {
-        transformStamped = tfBuffer_->lookupTransform(mapFrameId_, sensorFrameId, tf2::TimePointZero);
+        transformStamped = tfBuffer_->lookupTransform(mapFrameId_, sensorFrameId, timeStamp, rclcpp::Duration::from_seconds(0.02));
         transformationSensorToMap = tf2::transformToEigen(transformStamped);
     } catch (tf2::TransformException& ex) {
         RCLCPP_ERROR(this->get_logger(), "%s", ex.what());
