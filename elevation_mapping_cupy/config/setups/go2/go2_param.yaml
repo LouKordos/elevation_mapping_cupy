@@ -33,9 +33,9 @@ elevation_mapping_node:
     update_variance_fps: 50.0                        # fps for updating variance.
     update_pose_fps: 50.0                           # fps for updating pose and shift the center of map.
     time_interval: 0.05                              # Time layer is updated with this interval.
-    map_acquire_fps: 50.0                            # Raw map is fetched from GPU memory in this fps.
+    map_acquire_fps: 20.0                            # Raw map is fetched from GPU memory in this fps.
     publish_statistics_fps: 5.0                     # Publish statistics topic in this fps.
-    recordable_fps: 50.0                           # Recordable fps for pointcloud.
+    recordable_fps: 20.0                           # Recordable fps for pointcloud.
     enable_normal_arrow_publishing: false
 
     max_ray_length: 10.0                            # maximum length for ray tracing.
