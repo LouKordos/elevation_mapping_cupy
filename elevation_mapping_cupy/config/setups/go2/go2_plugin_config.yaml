@@ -6,7 +6,7 @@ min_filter:
   layer_name: "min_filter"                    # The layer name.
   extra_params:                               # This params are passed to the plugin class on initialization.
     dilation_size: 1                         # The patch size to apply
-    iteration_n: 3                           # The number of iterations
+    iteration_n: 1                           # The number of iterations
 # Apply smoothing.
 smooth_filter:
   enable: True
