@@ -55,10 +55,10 @@ Visualization Manager:
       Autocompute Intensity Bounds: true
       Class: grid_map_rviz_plugin/GridMap
       Color: 200; 200; 200
-      Color Layer: smooth
+      Color Layer: min_filter
       Color Transformer: ""
       Enabled: true
-      Height Layer: smooth
+      Height Layer: min_filter
       Height Transformer: GridMapLayer
       History Length: 1
       Invert Rainbow: false
