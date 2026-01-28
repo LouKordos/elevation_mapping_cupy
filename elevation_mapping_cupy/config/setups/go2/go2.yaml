@@ -9,8 +9,8 @@
       elevation_map_raw:
         layers: ['elevation', 'variance']
         basic_layers: ['elevation']
-        fps: 20.0
+        fps: 5.0
       elevation_map_filter:
-        layers: ['min_filter', 'smooth', 'elevation']
+        layers: ['min_filter', 'smooth', 'elevation', 'variance']
         basic_layers: ['min_filter']
-        fps: 50.0
+        fps: 20.0
