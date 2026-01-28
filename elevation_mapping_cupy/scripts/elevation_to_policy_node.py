@@ -34,8 +34,8 @@ class ElevationToPolicyNode(Node):
         super().__init__("elevation_to_policy_node")
         
         # Coordinate Frames
-        self.odometry_frame_id = "odom"
-        self.robot_base_frame_id = "base"
+        self.odometry_frame_id = "vicon/world"
+        self.robot_base_frame_id = "vicon/Go2_Loukas/Go2"
         self.foot_frame_ids = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
         
         # Grid Configuration
