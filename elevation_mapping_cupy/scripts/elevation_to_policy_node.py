@@ -412,8 +412,8 @@ class ElevationToPolicyNode(Node):
             y_vector = np.flip(y_vector)
             map_data_grid = np.flip(map_data_grid, axis=1)
 
-        DEBUG_RAW_VALUES = False
-        if DEBUG_RAW_VALUES and layer_name == "smooth":
+        PRINT_RAW_VALUES = True
+        if PRINT_RAW_VALUES and layer_name == "min_filter":
             # Slice Front Half (Mid -> End) and Downsample (Step 2)
             # map_data_grid is (X, Y). x-axis is forward.
             mid_idx = map_data_grid.shape[0] // 2
