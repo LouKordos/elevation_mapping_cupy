@@ -434,7 +434,10 @@ imageChannelReady_[key] = std::make_pair(*channel_info, true);
 
 
 void ElevationMappingNode::pointcloudtransportCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud, const std::string& key) {
-  
+  rclcpp::Time now = this->now();
+  rclcpp::Time msg_time = cloud->header.stamp;
+  double input_lag = (now - msg_time).seconds();
+  // RCLCPP_INFO(this->get_logger(), "Input Lag: %.4f s", input_lag);
   //  get channels
   auto fields = cloud->fields;
   std::vector<std::string> channels;
@@ -523,6 +526,9 @@ void ElevationMappingNode::inputPointCloud(const sensor_msgs::msg::PointCloud2::
     if (enableDriftCorrectedTFPublishing_) {
         publishMapToOdom(map_->get_additive_mean_error());
     }
+
+    auto duration = (this->now() - start).seconds();
+    // RCLCPP_INFO(this->get_logger(), "Processing time: %.4f s ", duration);
 
     RCLCPP_DEBUG(this->get_logger(), "ElevationMap processed a point cloud (%i points) in %f sec.", static_cast<int>(points.size()),
                  (this->now() - start).seconds());
@@ -886,6 +892,7 @@ void ElevationMappingNode::publishStatistics() {
 }
 
 void ElevationMappingNode::updateGridMap() {
+  auto start = this->now(); 
   std::vector<std::string> layers(map_layers_all_.begin(), map_layers_all_.end());
   std::lock_guard<std::mutex> lock(mapMutex_);
   map_->get_grid_map(gridMap_, layers);
@@ -900,6 +907,8 @@ void ElevationMappingNode::updateGridMap() {
     publishNormalAsArrow(gridMap_);
   }
   isGridmapUpdated_ = true;
+  auto duration = (this->now() - start).seconds();
+  // RCLCPP_INFO(this->get_logger(), "GridMap publish time: %.4f s", duration);
 }
 
 void ElevationMappingNode::initializeMap(const std::shared_ptr<elevation_map_msgs::srv::Initialize::Request> request,
