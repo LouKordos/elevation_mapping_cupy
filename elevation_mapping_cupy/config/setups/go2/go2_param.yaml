@@ -1,7 +1,7 @@
 elevation_mapping_node:
   ros__parameters:
     #### Basic parameters ########
-    voxel_filter_size: 0.1
+    voxel_filter_size: 0.02
     average_weight: 0.5
     drift_compensation_variance_inlier: 0.1
     checker_layer: 'elevation'                # layer name for checking the validity of the cell.
