@@ -35,7 +35,7 @@ class ElevationToPolicyNode(Node):
         
         # Coordinate Frames
         self.odometry_frame_id = "vicon/world"
-        self.robot_base_frame_id = "vicon/Go2_Loukas/Go2"
+        self.robot_base_frame_id = "vicon/Go2_Loukas/Go2_Loukas"
         self.foot_frame_ids = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
         
         # Grid Configuration
