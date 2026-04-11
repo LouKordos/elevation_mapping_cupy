@@ -13,6 +13,7 @@ import os
 import json
 import threading
 import queue
+import gc
 from datetime import datetime, timezone
 
 class NumpyEncoder(json.JSONEncoder):
@@ -203,6 +204,7 @@ class ElevationToPolicyNode(Node):
         3. Queries the map at the robot's current location.
         4. Publishes ZMQ messages.
         """
+        gc.disable()
         # Retrieve the latest map context safely
         current_map_context = None
         with self.map_lock:
@@ -278,6 +280,7 @@ class ElevationToPolicyNode(Node):
                 "grid": grid_relative
             }
             self.dispatch_data(layer_name, "rel", packet_relative)
+            gc.enable()
 
     def dispatch_data(self, layer_name, layer_type, data_dictionary):
         """
