@@ -10,6 +10,7 @@ from tf2_ros import TransformException
 from scipy.spatial.transform import Rotation as ScipyRotation
 from scipy.interpolate import RegularGridInterpolator
 import os
+import time
 import json
 import threading
 import queue
@@ -46,6 +47,7 @@ class ElevationToPolicyNode(Node):
         self.sensor_offset_x_meters = 0.2
         self.fill_value_body_frame = -0.27
         self.fill_value_absolute = 0.0
+        self.last_publish_time = time.perf_counter()
         
         # ZMQ Configuration
         self.zmq_context = zmq.Context()        
@@ -57,17 +59,28 @@ class ElevationToPolicyNode(Node):
             "smooth": 6974
         }
         
-        # Initialize ZMQ Publishers
+        # Was having issues with occasional latency spikes that also occured even with ICMP (ping -i 0.02 -s 2000)
+        # so these params are optimized for low latency and discarding older messages
         for layer_name, port_number in base_ports.items():
             self.zmq_sockets[layer_name] = {}
-            
             socket_absolute = self.zmq_context.socket(zmq.PUB)
+            
+            socket_absolute.setsockopt(zmq.CONFLATE, 1) # Keep only the absolute newest message, drop all others
+            socket_absolute.setsockopt(zmq.SNDHWM, 2) # Limit High Water Mark (redundant with conflate, but good practice)
+            socket_absolute.setsockopt(zmq.LINGER, 0) # Prevent socket from hanging on shutdown trying to send old data
+            
             socket_absolute.bind(f"tcp://*:{port_number}")
             self.zmq_sockets[layer_name]["abs"] = socket_absolute
             
             socket_relative = self.zmq_context.socket(zmq.PUB)
+            
+            socket_relative.setsockopt(zmq.CONFLATE, 1)
+            socket_relative.setsockopt(zmq.SNDHWM, 2)
+            socket_relative.setsockopt(zmq.LINGER, 0)
+            
             socket_relative.bind(f"tcp://*:{port_number + 1}")
             self.zmq_sockets[layer_name]["rel"] = socket_relative
+
 
             self.get_logger().info(f"ZMQ Init: {layer_name} (Abs: {port_number}, Rel: {port_number+1})")
 
@@ -214,6 +227,12 @@ class ElevationToPolicyNode(Node):
         if current_map_context is None:
             self.get_logger().warn("Waiting for first map...", throttle_duration_sec=0.2)
             return
+        
+        delta_t_ms_last_iteration = (time.perf_counter() - self.last_publish_time) / 1e+3
+        if delta_t_ms_last_iteration > 20.0:
+            print("!!!!!!!!!!!!!!!!!!! Iteration took longer than 20ms!!!!!!!!!!!!!!!!")
+            print(f"actual delta_t={delta_t_ms_last_iteration}")
+        self.last_publish_time = time.perf_counter()
 
         # Get the current time for the robot pose
         current_ros_time = self.get_clock().now()
