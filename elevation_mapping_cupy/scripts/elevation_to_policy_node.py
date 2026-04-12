@@ -43,7 +43,7 @@ class ElevationToPolicyNode(Node):
         # Grid Configuration
         self.num_grid_points_x = 13
         self.num_grid_points_y = 11
-        self.grid_resolution_meters = 0.08
+        self.grid_resolution_meters = 0.08 # TODO: Get these parameters from ROS natively to keep them updated!!!
         self.sensor_offset_x_meters = 0.2
         self.fill_value_body_frame = -0.27
         self.fill_value_absolute = 0.0
@@ -80,7 +80,6 @@ class ElevationToPolicyNode(Node):
             
             socket_relative.bind(f"tcp://*:{port_number + 1}")
             self.zmq_sockets[layer_name]["rel"] = socket_relative
-
 
             self.get_logger().info(f"ZMQ Init: {layer_name} (Abs: {port_number}, Rel: {port_number+1})")
 
